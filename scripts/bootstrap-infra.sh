@@ -23,17 +23,29 @@ gcloud iam service-accounts create "$AGENT_SA" --display-name "Vertex ADK Agent"
 RECEIVER_SA_EMAIL="$RECEIVER_SA@$PROJECT_ID.iam.gserviceaccount.com"
 AGENT_SA_EMAIL="$AGENT_SA@$PROJECT_ID.iam.gserviceaccount.com"
 
-echo "Granting Pub/Sub publish permission to Gmail service account (placeholder)..."
-echo "Add the Gmail push service account when watch() is registered."
-
 echo "Creating Pub/Sub topic $TOPIC..."
 gcloud pubsub topics create "$TOPIC" --project "$PROJECT_ID" || true
+
+echo "Granting Pub/Sub publish permission to Gmail API service account..."
+# Gmail uses this service account to publish notifications
+gcloud pubsub topics add-iam-policy-binding "$TOPIC" \
+  --member="serviceAccount:gmail-api-push@system.gserviceaccount.com" \
+  --role="roles/pubsub.publisher" \
+  --project "$PROJECT_ID" || true
 
 echo "Reminder: deploy gmail-receiver before creating push subscription."
 
 echo "Creating Secrets placeholders..."
 gcloud secrets create gmail-oauth-client --replication-policy=automatic --project "$PROJECT_ID" || true
 gcloud secrets create gmail-refresh-tokens --replication-policy=automatic --project "$PROJECT_ID" || true
+
+echo "Granting Secret Manager access to service accounts..."
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:$RECEIVER_SA_EMAIL" \
+  --role="roles/secretmanager.secretAccessor" >/dev/null || true
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:$AGENT_SA_EMAIL" \
+  --role="roles/secretmanager.secretAccessor" >/dev/null || true
 
 echo "Bootstrap complete."
 

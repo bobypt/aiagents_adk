@@ -15,7 +15,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from google.auth import jwt
 from google.auth.exceptions import GoogleAuthError
-from google.auth.oauthlib.flow import Flow
+from google_auth_oauthlib.flow import Flow
 from google.cloud import secretmanager
 from google.oauth2 import credentials
 from googleapiclient.discovery import build
@@ -33,8 +33,11 @@ REFRESH_TOKEN_SECRET_NAME = os.environ.get(
 )
 
 SCOPES = [
+    "openid",
     "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/userinfo.email",
 ]
 
 app = FastAPI(title="Gmail Receiver Service", version="0.1.0")

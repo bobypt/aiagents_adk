@@ -15,8 +15,10 @@ Bootstrap scaffolding for an automated Gmail reply workflow on Google Cloud:
 - `uv` (https://github.com/astral-sh/uv) for Python environment management
 - `npm` ≥ 9 if you extend tooling with TypeScript
 - OAuth 2.0 Web Client configured for Gmail API scopes:
-  - `https://www.googleapis.com/auth/gmail.modify`
   - `https://www.googleapis.com/auth/gmail.compose`
+  - `https://www.googleapis.com/auth/gmail.modify`
+  - `https://www.googleapis.com/auth/gmail.readonly`
+  - `https://www.googleapis.com/auth/userinfo.email`
 
 ### Quickstart
 
@@ -24,6 +26,10 @@ Bootstrap scaffolding for an automated Gmail reply workflow on Google Cloud:
    ```bash
    export PROJECT_ID=loanstax-agentic-ai
    export REGION=us-central1
+
+   gcloud auth application-default login
+
+
    ```
 
 2. **Enable APIs**
@@ -43,16 +49,47 @@ Bootstrap scaffolding for an automated Gmail reply workflow on Google Cloud:
    The script creates:
    - Pub/Sub topic `gmail-notifications`
    - Service accounts for the receiver and agent
+   - Secret placeholders (and grants Secret Manager access to those service accounts) for OAuth config and refresh tokens
+   > **Note:** grant the user or CI principal that runs `gcloud run deploy` the `roles/iam.serviceAccountUser` role on `gmail-receiver-sa` (and `vertex-adk-agent-sa`) so it can act-as the service account during deployment.
+   The script creates:
+   - Pub/Sub topic `gmail-notifications`
+   - Service accounts for the receiver and agent
    - Secret placeholders for OAuth config and refresh tokens
 
-4. **Deploy receiver and agent**
+4. **Load OAuth client and run consent flow locally**
    ```bash
-   export AGENT_ENDPOINT=$(gcloud run services describe vertex-adk-agent --project $PROJECT_ID --region $REGION --format='value(status.url)')/agent/run
+   # create an oAuth client in GCP console
+   
+   # upload your OAuth client JSON (download from Google Cloud Console)
+   printf '%s' "$(cat services/receiver/oauth-client.json)" | \
+     gcloud secrets versions add gmail-oauth-client \
+       --data-file=- \
+       --project=$PROJECT_ID
+
+   ./services/receiver/dev.sh
+   # Visit http://localhost:8080/oauth/start, authenticate, and store the refresh token in Secret Manager.
+   # After success, stop the dev server (Ctrl+C).
+
+
+   # verify 
+   gcloud secrets versions access latest --secret=gmail-refresh-tokens --project=loanstax-agentic-ai
+
+
+
+   ```
+   This seeds `gmail-refresh-tokens` with the first version so Cloud Run can mount it.
+
+5. **Deploy receiver and agent**
+   ```bash
+   
    ./services/receiver/deploy.sh
    ./agents/vertex-adk/deploy.sh
+
+   export AGENT_ENDPOINT=$(gcloud run services describe vertex-adk-agent --project $PROJECT_ID --region $REGION --format='value(status.url)')/agent/run
+
    ```
 
-5. **Create Pub/Sub push subscription**
+6. **Create Pub/Sub push subscription**
    ```bash
    RECEIVER_URL=$(gcloud run services describe gmail-receiver --project $PROJECT_ID --region $REGION --format='value(status.url)')
    gcloud pubsub subscriptions create gmail-notifications-push \
@@ -61,15 +98,23 @@ Bootstrap scaffolding for an automated Gmail reply workflow on Google Cloud:
      --push-auth-service-account gmail-receiver-sa@$PROJECT_ID.iam.gserviceaccount.com
    ```
 
-6. **Run OAuth consent flow locally**
-   ```bash
-   ./services/receiver/dev.sh
-   # Visit http://localhost:8080/oauth/start, authenticate, and store refresh token in Secret Manager.
-   ```
-
 7. **Register Gmail watch**
    After consent, the receiver automatically calls `users.watch`. You can re-run manually with:
    ```bash
+
+   RECEIVER_URL=$(gcloud run services describe gmail-receiver \
+     --project=loanstax-agentic-ai \
+     --region=us-central1 \
+     --format='value(status.url)')
+
+
+   ID_TOKEN=$(gcloud auth print-identity-token --audiences=$RECEIVER_URL)
+
+    curl -X POST "$RECEIVER_URL/watch" \
+     -H "Authorization: Bearer $ID_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"email":"hello@kagence.ai"}'
+
    curl -X POST https://<receiver-url>/watch -H "Authorization: Bearer <ID_TOKEN>" -d '{"email":"you@example.com"}'
    ```
 

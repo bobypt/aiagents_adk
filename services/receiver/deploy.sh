@@ -18,7 +18,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --project "$PROJECT_ID" \
   --region "$REGION" \
   --service-account "${SERVICE_ACCOUNT:-$SERVICE_NAME-sa@$PROJECT_ID.iam.gserviceaccount.com}" \
-  --allow-unauthenticated=false \
+  --no-allow-unauthenticated \
   --set-env-vars "PROJECT_ID=$PROJECT_ID,REGION=$REGION,AGENT_ENDPOINT=$AGENT_ENDPOINT" \
   --set-secrets "OAUTH_CLIENT_SECRET_NAME=gmail-oauth-client:latest,REFRESH_TOKEN_SECRET_NAME=gmail-refresh-tokens:latest"
 

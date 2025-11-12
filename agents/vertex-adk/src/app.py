@@ -8,14 +8,14 @@ import os
 from typing import Any, Dict, List, Optional
 
 import google.auth.transport.requests
-from fastapi import FastAPI, HTTPException, Request, Response, status
+from fastapi import FastAPI, HTTPException, status
 from google.cloud import aiplatform, secretmanager
 from google.oauth2 import credentials
 from googleapiclient.discovery import build
 from pydantic import BaseModel
 import vertexai
 from vertexai.language_models import TextEmbeddingModel
-from vertexai.preview.generative_models import GenerativeModel, GenerationConfig
+from vertexai.generative_models import GenerativeModel, GenerationConfig
 
 PROJECT_ID = os.environ.get("PROJECT_ID")
 LOCATION = os.environ.get("LOCATION", "us-central1")
@@ -36,13 +36,34 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
 ]
 
-vertexai.init(project=PROJECT_ID, location=LOCATION)
-aiplatform.init(project=PROJECT_ID, location=LOCATION)
-
 app = FastAPI(title="Vertex ADK Agent", version="0.1.0")
-secret_client = secretmanager.SecretManagerServiceClient()
-embedding_model = TextEmbeddingModel.from_pretrained(VERTEX_EMBEDDING_MODEL)
-generative_model = GenerativeModel(VERTEX_GENERATION_MODEL)
+
+_secret_client = None
+
+
+def get_secret_client():
+    global _secret_client
+    if _secret_client is None:
+        _secret_client = secretmanager.SecretManagerServiceClient()
+    return _secret_client
+
+# Lazy initialization - only initialize when needed
+_vertex_initialized = False
+_embedding_model = None
+_generative_model = None
+
+
+def _ensure_vertex_init():
+    global _vertex_initialized, _embedding_model, _generative_model
+    if not _vertex_initialized:
+        if not PROJECT_ID:
+            raise RuntimeError("PROJECT_ID environment variable is not set")
+        vertexai.init(project=PROJECT_ID, location=LOCATION)
+        aiplatform.init(project=PROJECT_ID, location=LOCATION)
+        _embedding_model = TextEmbeddingModel.from_pretrained(VERTEX_EMBEDDING_MODEL)
+        _generative_model = GenerativeModel(VERTEX_GENERATION_MODEL)
+        _vertex_initialized = True
+    return _embedding_model, _generative_model
 
 
 class AgentRequest(BaseModel):
@@ -58,16 +79,16 @@ class AgentResponse(BaseModel):
 
 
 def load_oauth_config() -> Dict[str, Any]:
-    response = secret_client.access_secret_version(name=OAUTH_CLIENT_SECRET_NAME)
+    response = get_secret_client().access_secret_version(name=OAUTH_CLIENT_SECRET_NAME)
     return json.loads(response.payload.data.decode("utf-8"))
 
 
 def iter_refresh_tokens() -> List[Dict[str, Any]]:
     tokens: List[Dict[str, Any]] = []
-    for version in secret_client.list_secret_versions(request={"parent": REFRESH_TOKEN_SECRET_NAME}):
+    for version in get_secret_client().list_secret_versions(request={"parent": REFRESH_TOKEN_SECRET_NAME}):
         if version.state.name != "ENABLED":
             continue
-        resp = secret_client.access_secret_version(name=version.name)
+        resp = get_secret_client().access_secret_version(name=version.name)
         try:
             tokens.append(json.loads(resp.payload.data.decode("utf-8")))
         except json.JSONDecodeError:
@@ -100,6 +121,7 @@ def build_credentials(email: str) -> credentials.Credentials:
 def retrieve_context(query_text: str) -> List[Dict[str, Any]]:
     if not (VERTEX_INDEX_ENDPOINT and VERTEX_DEPLOYED_INDEX_ID):
         return []
+    embedding_model, _ = _ensure_vertex_init()
     vector = embedding_model.get_embeddings([query_text])[0].values
 
     endpoint = aiplatform.MatchingEngineIndexEndpoint(index_endpoint_name=VERTEX_INDEX_ENDPOINT)
@@ -148,6 +170,7 @@ Provide output as markdown.
 
 
 def generate_reply(prompt: str) -> str:
+    _, generative_model = _ensure_vertex_init()
     result = generative_model.generate_content(
         prompt,
         generation_config=GenerationConfig(
@@ -186,7 +209,8 @@ def create_gmail_draft(creds: credentials.Credentials, email: str, reply: str, t
 
 @app.get("/healthz")
 def healthz() -> Dict[str, str]:
-    return {"status": "ok"}
+    """Health check endpoint that doesn't require Vertex AI initialization."""
+    return {"status": "ok", "project_id": PROJECT_ID or "not_set"}
 
 
 @app.post("/agent/run", response_model=AgentResponse)

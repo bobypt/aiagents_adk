@@ -17,8 +17,8 @@ that performs retrieval-augmented generation and creates Gmail drafts.
 ```bash
 cd agents/vertex-adk
 uv sync
-export PROJECT_ID=your-project
-export LOCATION=us-central1
+export PROJECT_ID=loanstax-agentic-ai
+export REGION=us-central1
 uv run uvicorn src.app:app --host 0.0.0.0 --port 8090
 ```
 

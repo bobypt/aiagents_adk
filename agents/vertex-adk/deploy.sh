@@ -17,7 +17,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --project "$PROJECT_ID" \
   --region "$REGION" \
   --service-account "${SERVICE_ACCOUNT:-$SERVICE_NAME-sa@$PROJECT_ID.iam.gserviceaccount.com}" \
-  --allow-unauthenticated=false \
+  --no-allow-unauthenticated \
   --set-env-vars "PROJECT_ID=$PROJECT_ID,LOCATION=$REGION"
 
 popd >/dev/null
