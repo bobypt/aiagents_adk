@@ -56,14 +56,26 @@ def load_oauth_config() -> Dict[str, Any]:
 
 def verify_pubsub_token(authorization: Optional[str] = Header(default=None)) -> None:
     if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing bearer token in Authorization header"
+        )
+
+    if not PUBSUB_VERIFICATION_AUDIENCE:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="PUBSUB_VERIFICATION_AUDIENCE environment variable not set. Please redeploy the service."
+        )
 
     token = authorization.split(" ", 1)[1]
     request_adapter = google.auth.transport.requests.Request()
     try:
         jwt.decode(token, request_adapter, audience=PUBSUB_VERIFICATION_AUDIENCE)
     except GoogleAuthError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Invalid Pub/Sub token: {str(exc)}"
+        ) from exc
 
 
 def iter_refresh_tokens() -> List[Dict[str, Any]]:
