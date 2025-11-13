@@ -1,0 +1,30 @@
+# Files to exclude from Cloud Build upload
+# Note: uv.lock is NOT excluded - it's needed for reproducible builds
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist/
+build/
+.venv/
+venv/
+ENV/
+env/
+.env
+.git/
+.gitignore
+README.md
+*.md
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# uv.lock is NOT in the list above, so it will be included

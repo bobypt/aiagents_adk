@@ -20,8 +20,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --region "$REGION" \
   --service-account "$SERVICE_ACCOUNT" \
   --no-allow-unauthenticated \
-  --set-env-vars "PROJECT_ID=$PROJECT_ID,REGION=$REGION,AGENT_ENDPOINT=$AGENT_ENDPOINT" \
-  --set-secrets "OAUTH_CLIENT_SECRET_NAME=gmail-oauth-client:latest,REFRESH_TOKEN_SECRET_NAME=gmail-refresh-tokens:latest"
+  --set-env-vars "PROJECT_ID=$PROJECT_ID,REGION=$REGION,AGENT_ENDPOINT=$AGENT_ENDPOINT,OAUTH_CLIENT_SECRET_NAME=gmail-oauth-client,REFRESH_TOKEN_SECRET_NAME=gmail-refresh-tokens"
 
 # Get the service URL after deployment
 RECEIVER_URL=$(gcloud run services describe "$SERVICE_NAME" \

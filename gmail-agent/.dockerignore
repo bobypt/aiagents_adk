@@ -1,0 +1,23 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+.venv
+venv
+.env
+.git
+.gitignore
+README.md
+*.md
+.vscode
+.idea
+
+# Keep uv.lock for reproducible builds
+# !uv.lock
+

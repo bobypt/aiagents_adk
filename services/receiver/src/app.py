@@ -25,12 +25,16 @@ PROJECT_ID = os.environ.get("PROJECT_ID")
 REGION = os.environ.get("REGION", "us-central1")
 PUBSUB_VERIFICATION_AUDIENCE = os.environ.get("PUBSUB_VERIFICATION_AUDIENCE")
 AGENT_ENDPOINT = os.environ.get("AGENT_ENDPOINT")
-OAUTH_CLIENT_SECRET_NAME = os.environ.get(
-    "OAUTH_CLIENT_SECRET_NAME", f"projects/{PROJECT_ID}/secrets/gmail-oauth-client/versions/latest"
-)
-REFRESH_TOKEN_SECRET_NAME = os.environ.get(
-    "REFRESH_TOKEN_SECRET_NAME", f"projects/{PROJECT_ID}/secrets/gmail-refresh-tokens"
-)
+
+# Secret names: when using --set-secrets, Cloud Run sets these as env vars with just the secret name
+# We need to construct the full resource path if it's not already a full path
+_oauth_secret_name = os.environ.get("OAUTH_CLIENT_SECRET_NAME", "gmail-oauth-client")
+_refresh_token_secret_name = os.environ.get("REFRESH_TOKEN_SECRET_NAME", "gmail-refresh-tokens")
+
+# Store the secret names (will construct full paths at runtime when PROJECT_ID is available)
+# This avoids issues if PROJECT_ID is not available at module load time
+OAUTH_SECRET_NAME = _oauth_secret_name
+REFRESH_TOKEN_SECRET_NAME = _refresh_token_secret_name
 
 SCOPES = [
     "openid",
@@ -41,7 +45,18 @@ SCOPES = [
 ]
 
 app = FastAPI(title="Gmail Receiver Service", version="0.1.0")
-secret_client = secretmanager.SecretManagerServiceClient()
+# Initialize Secret Manager client lazily to avoid startup issues
+_secret_client = None
+
+def get_secret_client():
+    global _secret_client
+    if _secret_client is None:
+        # Initialize with explicit project if available
+        if PROJECT_ID:
+            _secret_client = secretmanager.SecretManagerServiceClient(project=PROJECT_ID)
+        else:
+            _secret_client = secretmanager.SecretManagerServiceClient()
+    return _secret_client
 
 
 class PubSubMessage(BaseModel):
@@ -50,7 +65,21 @@ class PubSubMessage(BaseModel):
 
 
 def load_oauth_config() -> Dict[str, Any]:
-    response = secret_client.access_secret_version(name=OAUTH_CLIENT_SECRET_NAME)
+    # Always construct full resource path at runtime using PROJECT_ID
+    if not PROJECT_ID:
+        raise ValueError("PROJECT_ID environment variable must be set to access secrets")
+    
+    # Use the secret name (either from env var or default)
+    secret_name = OAUTH_SECRET_NAME
+    # Construct full resource path
+    secret_path = f"projects/{PROJECT_ID}/secrets/{secret_name}/versions/latest"
+    
+    # Log the secret name being used for debugging
+    print(f"Loading OAuth config from secret: {secret_path}", flush=True)
+    print(f"PROJECT_ID: {PROJECT_ID}, secret_name: {secret_name}", flush=True)
+    
+    secret_client = get_secret_client()
+    response = secret_client.access_secret_version(name=secret_path)
     return json.loads(response.payload.data.decode("utf-8"))
 
 
@@ -122,8 +151,18 @@ def verify_pubsub_token(authorization: Optional[str] = Header(default=None)) -> 
 
 
 def iter_refresh_tokens() -> List[Dict[str, Any]]:
+    # Always construct full resource path at runtime using PROJECT_ID
+    if not PROJECT_ID:
+        raise ValueError("PROJECT_ID environment variable must be set to access secrets")
+    
+    # Use the secret name (either from env var or default)
+    secret_name = REFRESH_TOKEN_SECRET_NAME
+    # Construct full resource path (parent path for listing versions)
+    secret_parent = f"projects/{PROJECT_ID}/secrets/{secret_name}"
+    
+    secret_client = get_secret_client()
     tokens: List[Dict[str, Any]] = []
-    for version in secret_client.list_secret_versions(request={"parent": REFRESH_TOKEN_SECRET_NAME}):
+    for version in secret_client.list_secret_versions(request={"parent": secret_parent}):
         if version.state.name != "ENABLED":
             continue
         response = secret_client.access_secret_version(name=version.name)
@@ -135,10 +174,15 @@ def iter_refresh_tokens() -> List[Dict[str, Any]]:
 
 
 def get_refresh_token(email: str) -> str:
-    for entry in iter_refresh_tokens():
-        if entry.get("email") == email:
+    tokens = iter_refresh_tokens()
+    print(f"Looking for refresh token for {email}, found {len(tokens)} token(s) in Secret Manager", flush=True)
+    for entry in tokens:
+        entry_email = entry.get("email")
+        print(f"  Checking token for: {entry_email}", flush=True)
+        if entry_email == email:
+            print(f"  Found refresh token for {email}", flush=True)
             return entry["refresh_token"]
-    raise RuntimeError(f"No refresh token stored for {email}")
+    raise RuntimeError(f"No refresh token stored for {email}. Available emails: {[e.get('email') for e in tokens]}")
 
 
 def build_credentials(email: str) -> credentials.Credentials:
@@ -220,9 +264,13 @@ async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] =
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing email address in notification")
 
     try:
+        print(f"Processing notification for {email_address}, messageId={message_id}, historyId={history_id}", flush=True)
         creds = build_credentials(email_address)
+        print(f"Credentials built successfully for {email_address}", flush=True)
         message = fetch_message(creds, email_address, message_id, history_id)
+        print(f"Message fetched successfully: {message.get('id')}", flush=True)
         sanitized = sanitize_message(message)
+        print(f"Message sanitized: subject={sanitized.get('subject')}", flush=True)
 
         agent_response = call_agent(
             {
@@ -232,8 +280,18 @@ async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] =
                 "pubsub_attributes": attributes,
             }
         )
-        print(json.dumps({"agent_response": agent_response}))  # basic structured logging
+        print(json.dumps({"agent_response": agent_response}), flush=True)
     except Exception as exc:  # broad catch to force Pub/Sub retry on failure
+        # Log detailed error information for debugging
+        import traceback
+        error_type = type(exc).__name__
+        error_msg = str(exc)
+        error_traceback = traceback.format_exc()
+        
+        print(f"ERROR processing notification: {error_type}: {error_msg}", flush=True)
+        print(f"Traceback: {error_traceback}", flush=True)
+        print(f"Context: email={email_address}, messageId={message_id}, historyId={history_id}", flush=True)
+        
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
