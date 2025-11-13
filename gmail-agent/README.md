@@ -140,8 +140,25 @@ For the `/agent/process-unread` endpoint to work, you need to configure Gmail AP
 3. **Optional Configuration**:
    ```bash
    PROJECT_ID=your-gcp-project-id
+   LOCATION=us-central1  # optional, defaults to us-central1
    GEMINI_MODEL=gemini-2.5-flash  # optional, defaults to gemini-2.5-flash
    ```
+
+4. **RAG Configuration (Optional - for knowledge base integration)**:
+   ```bash
+   # Enable RAG by setting these environment variables
+   VERTEX_INDEX_ENDPOINT=projects/your-project/locations/us-central1/indexEndpoints/your-endpoint-id
+   VERTEX_DEPLOYED_INDEX_ID=gmail_rag_deployed_index
+   VERTEX_EMBEDDING_MODEL=text-embedding-004  # optional, defaults to text-embedding-004
+   ```
+   
+   **Note:** If RAG environment variables are not set, the agent will work without RAG context.
+   
+   To set up RAG:
+   1. Create a Vertex Matching Engine index using the `rag/` folder scripts
+   2. Set `VERTEX_INDEX_ENDPOINT` to the full resource name of your index endpoint
+   3. Set `VERTEX_DEPLOYED_INDEX_ID` to the deployed index ID (e.g., `gmail_rag_deployed_index`)
+   4. See `rag/README.md` for detailed RAG setup instructions
 
 ### Setting Environment Variables in Cloud Run
 

@@ -9,17 +9,27 @@ from typing import Any, Dict, List, Optional
 import google.auth
 import google.auth.transport.requests
 from fastapi import FastAPI, HTTPException
+from google.cloud import aiplatform
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel, Field
+import vertexai
+from vertexai.language_models import TextEmbeddingModel
 
 app = FastAPI(title="Gmail Agent API", version="0.1.0")
 
 # Configuration
 PROJECT_ID = os.environ.get("PROJECT_ID")
+LOCATION = os.environ.get("LOCATION", "us-central1")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+# RAG Configuration (optional)
+VERTEX_INDEX_ENDPOINT = os.environ.get("VERTEX_INDEX_ENDPOINT")
+VERTEX_DEPLOYED_INDEX_ID = os.environ.get("VERTEX_DEPLOYED_INDEX_ID")
+VERTEX_EMBEDDING_MODEL = os.environ.get("VERTEX_EMBEDDING_MODEL", "text-embedding-004")
+RAG_ENABLED = bool(VERTEX_INDEX_ENDPOINT and VERTEX_DEPLOYED_INDEX_ID)
 
 # Gmail API scopes
 SCOPES = [
@@ -71,6 +81,10 @@ class EchoResponse(BaseModel):
 # Initialize LangChain model
 _llm = None
 
+# Initialize Vertex AI for RAG
+_vertex_initialized = False
+_embedding_model = None
+
 
 def get_llm():
     """Get or initialize LangChain Gemini model."""
@@ -84,6 +98,70 @@ def get_llm():
             temperature=0.4,
         )
     return _llm
+
+
+def _ensure_vertex_init():
+    """Initialize Vertex AI for RAG if enabled."""
+    global _vertex_initialized, _embedding_model
+    if not RAG_ENABLED:
+        return None
+    
+    if not _vertex_initialized:
+        if not PROJECT_ID:
+            raise RuntimeError("PROJECT_ID environment variable must be set for RAG")
+        vertexai.init(project=PROJECT_ID, location=LOCATION)
+        aiplatform.init(project=PROJECT_ID, location=LOCATION)
+        _embedding_model = TextEmbeddingModel.from_pretrained(VERTEX_EMBEDDING_MODEL)
+        _vertex_initialized = True
+        print(f"Initialized Vertex AI RAG: endpoint={VERTEX_INDEX_ENDPOINT}, index={VERTEX_DEPLOYED_INDEX_ID}", flush=True)
+    return _embedding_model
+
+
+def retrieve_context(query_text: str) -> List[Dict[str, Any]]:
+    """
+    Retrieve relevant context from Vertex Matching Engine using RAG.
+    Returns a list of relevant document chunks.
+    """
+    if not RAG_ENABLED:
+        return []
+    
+    try:
+        embedding_model = _ensure_vertex_init()
+        if not embedding_model:
+            return []
+        
+        # Generate embedding for the query
+        vector = embedding_model.get_embeddings([query_text])[0].values
+        
+        # Query the Matching Engine endpoint
+        endpoint = aiplatform.MatchingEngineIndexEndpoint(index_endpoint_name=VERTEX_INDEX_ENDPOINT)
+        response = endpoint.find_neighbors(
+            deployed_index_id=VERTEX_DEPLOYED_INDEX_ID,
+            queries=[vector],
+            num_neighbors=5,  # Retrieve top 5 similar chunks
+        )
+        
+        neighbors = response[0].neighbors if response else []
+        results: List[Dict[str, Any]] = []
+        for n in neighbors:
+            # Extract text from datapoint (stored during ingestion)
+            # Note: The actual text might be in metadata or we need to fetch it
+            results.append(
+                {
+                    "id": n.id,
+                    "distance": n.distance,
+                    # Note: Metadata retrieval depends on how it was stored during ingestion
+                    # For now, we'll just store the IDs and distances
+                }
+            )
+        
+        print(f"Retrieved {len(results)} relevant chunks from RAG", flush=True)
+        return results
+    
+    except Exception as e:
+        print(f"Error retrieving RAG context: {str(e)}", flush=True)
+        # Don't fail the entire request if RAG fails
+        return []
 
 
 def fetch_unread_messages(
@@ -219,11 +297,25 @@ def draft_email_reply(
     original_email: Dict[str, Any],
     headers: Dict[str, str],
     body: str,
+    rag_context: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
-    """Use LangChain to draft an email reply."""
+    """Use LangChain to draft an email reply, optionally using RAG context."""
     subject = headers.get("subject", "No Subject")
     from_addr = headers.get("from", "Unknown")
     to_addr = headers.get("to", "")
+
+    # Build context section if RAG results are available
+    context_section = ""
+    if rag_context and len(rag_context) > 0:
+        context_section = "\n\nRelevant Knowledge Base Context:\n"
+        # Note: Full text retrieval from datapoints requires fetching from storage
+        # For now, we'll indicate that context was retrieved with relevance scores
+        for idx, doc in enumerate(rag_context[:5], start=1):
+            relevance = 1 - doc.get("distance", 1.0)  # Convert distance to relevance (lower distance = higher relevance)
+            context_section += f"[Context {idx}] Relevance: {relevance:.2f}\n"
+        context_section += "\nUse this context to provide accurate, informed responses when relevant.\n"
+    else:
+        context_section = ""
 
     prompt = f"""You are a helpful email assistant. Draft a professional reply to the following email.
 
@@ -233,11 +325,12 @@ To: {to_addr}
 Subject: {subject}
 
 Body:
-{body[:1000]}
+{body[:1000]}{context_section}
 
 Draft a professional, concise reply that:
 - Addresses the sender by name if available
 - Responds to the key points in the email
+- Uses the provided context when relevant to answer questions or provide accurate information
 - Maintains a professional tone
 - Includes a polite closing
 
@@ -415,8 +508,16 @@ async def process_unread_emails(request: ProcessUnreadRequest) -> ProcessUnreadR
                 # Extract email body
                 body = extract_email_body(msg)
 
-                # Draft reply using LangChain
-                reply = draft_email_reply(llm, msg, headers, body)
+                # Retrieve RAG context (if enabled)
+                rag_context = None
+                if RAG_ENABLED:
+                    query_text = f"{subject} {body[:500]}"
+                    rag_context = retrieve_context(query_text)
+                    if rag_context:
+                        print(f"Retrieved {len(rag_context)} relevant chunks from RAG for {message_id}", flush=True)
+
+                # Draft reply using LangChain with RAG context
+                reply = draft_email_reply(llm, msg, headers, body, rag_context=rag_context)
                 print(f"Generated reply for {message_id} (length: {len(reply)} chars): {reply[:200]}...", flush=True)
 
                 # Get reply-to address (usually the "from" address of original)
