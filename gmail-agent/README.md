@@ -79,7 +79,7 @@ curl -X POST "https://gmail-agent-72679510753.us-central1.run.app/agent/process-
   -H "Content-Type: application/json" \
   -d '{
     "email": "hello@kagence.ai",
-    "max_emails": 3,
+    "max_emails": 1,
     "label_ids": ["UNREAD", "INBOX"],
     "skip_existing_drafts": true
   }'

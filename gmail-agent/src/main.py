@@ -258,27 +258,40 @@ def create_gmail_draft(
     original_subject: str,
     thread_id: Optional[str],
     reply_to_address: Optional[str] = None,
+    original_message_id: Optional[str] = None,
 ) -> str:
     """Create a Gmail draft."""
     gmail = build("gmail", "v1", credentials=creds)
 
     # Create MIME message
     from email.mime.text import MIMEText
+    from email.utils import formataddr, make_msgid
 
     subject = f"Re: {original_subject}" if not original_subject.startswith("Re:") else original_subject
 
-    message = MIMEText(reply_body)
+    # Ensure reply_body is not empty
+    if not reply_body or not reply_body.strip():
+        raise ValueError("Reply body cannot be empty")
+
+    message = MIMEText(reply_body, _charset="utf-8")
     message["From"] = email
     message["To"] = reply_to_address or email
     message["Subject"] = subject
 
-    if thread_id:
-        message["In-Reply-To"] = f"<{thread_id}@mail.gmail.com>"
-        message["References"] = f"<{thread_id}@mail.gmail.com>"
+    # Properly set In-Reply-To and References for threading
+    # Gmail will handle threading if we set threadId, but proper headers help
+    if original_message_id:
+        # Use the original message's Message-ID if available
+        # Format: <message-id> where message-id is the actual Message-ID header
+        message["In-Reply-To"] = original_message_id
+        message["References"] = original_message_id
 
+    # Create draft with threadId for proper threading
     raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
+    
+    # Debug: Log message details (without exposing sensitive content)
+    print(f"Creating draft: subject='{subject}', to='{reply_to_address}', body_length={len(reply_body)}, thread_id={thread_id}", flush=True)
 
-    # Create draft
     draft_body = {"message": {"raw": raw_message}}
     if thread_id:
         draft_body["message"]["threadId"] = thread_id
@@ -404,9 +417,13 @@ async def process_unread_emails(request: ProcessUnreadRequest) -> ProcessUnreadR
 
                 # Draft reply using LangChain
                 reply = draft_email_reply(llm, msg, headers, body)
+                print(f"Generated reply for {message_id} (length: {len(reply)} chars): {reply[:200]}...", flush=True)
 
                 # Get reply-to address (usually the "from" address of original)
                 reply_to = from_addr.split("<")[-1].split(">")[0].strip() if "<" in from_addr else from_addr
+
+                # Get original message ID for proper threading
+                original_message_id = headers.get("message-id") or f"<{message_id}@mail.gmail.com>"
 
                 # Create draft
                 draft_id = create_gmail_draft(
@@ -416,6 +433,7 @@ async def process_unread_emails(request: ProcessUnreadRequest) -> ProcessUnreadR
                     subject,
                     thread_id,
                     reply_to_address=reply_to,
+                    original_message_id=original_message_id,
                 )
 
                 print(f"Created draft {draft_id} for message {message_id}", flush=True)
