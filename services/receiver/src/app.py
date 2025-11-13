@@ -68,28 +68,56 @@ def verify_pubsub_token(authorization: Optional[str] = Header(default=None)) -> 
         )
 
     token = authorization.split(" ", 1)[1]
+    
     try:
-        # For Pub/Sub push notifications, verify the JWT token
-        # The token is signed by Google's service account
-        # Fetch certificates from Google's certificate URL for Pub/Sub
-        # Note: Pub/Sub uses Google's OAuth2 certificate endpoint
+        # For Pub/Sub push notifications with OIDC tokens, verify the JWT
+        # Pub/Sub signs the JWT with Google's OIDC service (service account)
+        # Fetch certificates from Google's OAuth2 certificate endpoint
         certs_url = "https://www.googleapis.com/oauth2/v1/certs"
         
-        # Fetch certificates using httpx synchronously
-        # Use synchronous Client since jwt.decode() is synchronous
+        # Fetch certificates using httpx
         with httpx.Client() as client:
-            response = client.get(certs_url, timeout=10.0)
-            response.raise_for_status()
-            certs = response.json()
+            certs_response = client.get(certs_url, timeout=10.0)
+            certs_response.raise_for_status()
+            certs = certs_response.json()
         
-        # jwt.decode() from google.auth.jwt expects certificates as a dict
-        # The dict maps key IDs (kid) to certificate strings (PEM format)
-        # Decode the JWT token with the fetched certificates
-        decoded_token = jwt.decode(token, certs, audience=PUBSUB_VERIFICATION_AUDIENCE)
-    except (GoogleAuthError, ValueError, TypeError, AttributeError, KeyError, httpx.HTTPError) as exc:
+        # jwt.decode() from google.auth.jwt expects:
+        # - token: JWT token string (first positional argument)
+        # - certs: dict mapping key IDs (kid) to PEM certificate strings (second positional argument)
+        # - audience: expected audience claim (keyword argument)
+        # The library will automatically find the correct certificate based on the 'kid' in the JWT header
+        decoded_token = jwt.decode(
+            token,
+            certs,
+            audience=PUBSUB_VERIFICATION_AUDIENCE
+        )
+        
+    except Exception as exc:
+        # Log detailed error for debugging
+        error_type = type(exc).__name__
+        error_msg = str(exc)
+        print(f"JWT verification failed: {error_type}: {error_msg}", flush=True)
+        print(f"Audience being checked: {PUBSUB_VERIFICATION_AUDIENCE}", flush=True)
+        print(f"Token length: {len(token)}", flush=True)
+        
+        # Check if it's an audience mismatch
+        if "audience" in error_msg.lower() or "aud" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Token audience mismatch. Expected: {PUBSUB_VERIFICATION_AUDIENCE}"
+            ) from exc
+        
+        # Check if it's a signature error
+        if "signature" in error_msg.lower() or "certificate" in error_msg.lower() or "invalid" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Token signature verification failed: {error_msg}"
+            ) from exc
+        
+        # Generic error
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Invalid Pub/Sub token: {str(exc)}"
+            detail=f"Invalid Pub/Sub token: {error_type}: {error_msg}"
         ) from exc
 
 

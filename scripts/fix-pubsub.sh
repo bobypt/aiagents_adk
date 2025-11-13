@@ -31,13 +31,15 @@ echo "Service URL: $RECEIVER_URL"
 echo ""
 
 # 1. Update the service with PUBSUB_VERIFICATION_AUDIENCE
+# Note: Pub/Sub sets the audience to the full push endpoint URL, not just the service URL
 echo "1. Updating service with PUBSUB_VERIFICATION_AUDIENCE..."
+PUSH_ENDPOINT="${RECEIVER_URL}/pubsub/push"
 gcloud run services update "$SERVICE_NAME" \
   --project "$PROJECT_ID" \
   --region "$REGION" \
-  --update-env-vars "PUBSUB_VERIFICATION_AUDIENCE=$RECEIVER_URL"
+  --update-env-vars "PUBSUB_VERIFICATION_AUDIENCE=$PUSH_ENDPOINT"
 
-echo "✓ Updated PUBSUB_VERIFICATION_AUDIENCE"
+echo "✓ Updated PUBSUB_VERIFICATION_AUDIENCE to $PUSH_ENDPOINT"
 echo ""
 
 # 2. Grant service account permission to invoke Cloud Run service

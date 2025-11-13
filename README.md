@@ -176,10 +176,12 @@ If you're seeing 403 errors when Pub/Sub tries to push messages to your Cloud Ru
    RECEIVER_URL=$(gcloud run services describe gmail-receiver --project $PROJECT_ID --region $REGION --format='value(status.url)')
    
    # 2. Update service with PUBSUB_VERIFICATION_AUDIENCE
+   # Note: Pub/Sub sets the audience to the full push endpoint URL, not just the service URL
+   PUSH_ENDPOINT="${RECEIVER_URL}/pubsub/push"
    gcloud run services update gmail-receiver \
      --project $PROJECT_ID \
      --region $REGION \
-     --update-env-vars "PUBSUB_VERIFICATION_AUDIENCE=$RECEIVER_URL"
+     --update-env-vars "PUBSUB_VERIFICATION_AUDIENCE=$PUSH_ENDPOINT"
    
    # 3. Grant service account permission
    gcloud run services add-iam-policy-binding gmail-receiver \
