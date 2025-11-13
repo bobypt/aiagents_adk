@@ -1,13 +1,19 @@
 [project]
 name = "gmail-agent"
 version = "0.1.0"
-description = "Simple Cloud Run API service"
+description = "Simple Cloud Run API service with LangChain for email drafting"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi==0.115.5",
     "uvicorn[standard]==0.32.0",
     "pydantic==2.9.2",
+    "langchain>=0.1.0",
+    "langchain-google-genai>=1.0.0",
+    "google-api-python-client==2.150.0",
+    "google-auth==2.36.0",
+    "google-auth-oauthlib==1.2.1",
+    "google-auth-httplib2==0.2.0",
 ]
 
 [tool.uv]
