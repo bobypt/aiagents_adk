@@ -68,10 +68,25 @@ def verify_pubsub_token(authorization: Optional[str] = Header(default=None)) -> 
         )
 
     token = authorization.split(" ", 1)[1]
-    request_adapter = google.auth.transport.requests.Request()
     try:
-        jwt.decode(token, request_adapter, audience=PUBSUB_VERIFICATION_AUDIENCE)
-    except GoogleAuthError as exc:
+        # For Pub/Sub push notifications, verify the JWT token
+        # The token is signed by Google's service account
+        # Fetch certificates from Google's certificate URL for Pub/Sub
+        # Note: Pub/Sub uses Google's OAuth2 certificate endpoint
+        certs_url = "https://www.googleapis.com/oauth2/v1/certs"
+        
+        # Fetch certificates using httpx synchronously
+        # Use synchronous Client since jwt.decode() is synchronous
+        with httpx.Client() as client:
+            response = client.get(certs_url, timeout=10.0)
+            response.raise_for_status()
+            certs = response.json()
+        
+        # jwt.decode() from google.auth.jwt expects certificates as a dict
+        # The dict maps key IDs (kid) to certificate strings (PEM format)
+        # Decode the JWT token with the fetched certificates
+        decoded_token = jwt.decode(token, certs, audience=PUBSUB_VERIFICATION_AUDIENCE)
+    except (GoogleAuthError, ValueError, TypeError, AttributeError, KeyError, httpx.HTTPError) as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Invalid Pub/Sub token: {str(exc)}"
