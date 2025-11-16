@@ -45,7 +45,7 @@ Visit http://localhost:8080 to see the API.
 ### 3. Deploy to Cloud Run
 
 ```bash
-export PROJECT_ID=your-project-id
+export PROJECT_ID=loanstax-agentic-ai
 export REGION=us-central1  # optional, defaults to us-central1
 export SERVICE_NAME=gmail-agent  # optional, defaults to gmail-agent
 
@@ -65,6 +65,18 @@ That's it! The script will:
 - `GET /health` - Health check
 - `POST /echo` - Echo endpoint for testing
 - `POST /agent/process-unread` - Process unread emails and create draft replies
+
+```bash
+export GMAIL_RESPONSER_AGENT_PATH=https://gmail-agent-musrgne2jq-uc.a.run.app
+curl -vvv $GMAIL_RESPONSER_AGENT_PATH/health
+curl -vvv $GMAIL_RESPONSER_AGENT_PATH/
+
+curl -X POST "$GMAIL_RESPONSER_AGENT_PATH/echo" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "hello"}'
+
+
+```
 
 ### Process Unread Emails
 

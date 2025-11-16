@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 import google.auth
 import google.auth.transport.requests
 from fastapi import FastAPI, HTTPException
+from fastapi import Header
 from google.cloud import aiplatform
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -77,6 +78,10 @@ class EchoResponse(BaseModel):
     echo: str
     original: str
 
+
+class PubSubMessage(BaseModel):
+    message: Dict[str, Any]
+    subscription: Optional[str] = None
 
 # Initialize LangChain model
 _llm = None
@@ -449,6 +454,90 @@ def health():
 def echo(request: EchoRequest):
     """Echo endpoint for testing."""
     return EchoResponse(echo=f"Echo: {request.message}", original=request.message)
+
+
+def _fetch_message_by_hint(
+    creds: Credentials,
+    email: str,
+    message_id: Optional[str],
+    history_id: Optional[str],
+) -> Dict[str, Any]:
+    gmail = build("gmail", "v1", credentials=creds)
+    if message_id:
+        return gmail.users().messages().get(userId=email, id=message_id, format="full").execute()
+    if not history_id:
+        raise ValueError("historyId is required when messageId is missing")
+    history = gmail.users().history().list(userId=email, startHistoryId=history_id, historyTypes=["MESSAGE_ADDED"]).execute()
+    histories = history.get("history", [])
+    for entry in histories:
+        for added in entry.get("messagesAdded", []):
+            return gmail.users().messages().get(userId=email, id=added["message"]["id"], format="full").execute()
+    raise RuntimeError("No recent messages found for provided historyId")
+
+
+@app.post("/pubsub/push")
+async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] = Header(default=None)) -> Dict[str, str]:
+    """
+    Minimal Pub/Sub push handler for Gmail watch notifications.
+    Note: For simplicity, token verification is not implemented here.
+    """
+    attributes = body.message.get("attributes", {})
+    envelope_data = body.message.get("data")
+    if not envelope_data:
+        raise HTTPException(status_code=400, detail="Missing message data")
+    try:
+        decoded = json.loads(base64.b64decode(envelope_data).decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid message data")
+
+    email_address = decoded.get("emailAddress")
+    message_id = decoded.get("messageId")
+    history_id = decoded.get("historyId")
+
+    if not email_address:
+        raise HTTPException(status_code=400, detail="Missing email address in notification")
+
+    try:
+        # Resolve credentials for this email
+        creds = get_credentials_for_email(email_address)
+
+        # Initialize LangChain model
+        llm = get_llm()
+
+        # Fetch message
+        message = _fetch_message_by_hint(creds, email_address, message_id, history_id)
+        headers = extract_headers(message)
+        subject = headers.get("subject", "No Subject")
+        from_addr = headers.get("from", "Unknown")
+        body_text = extract_email_body(message)
+
+        # Retrieve RAG context (optional)
+        rag_context = None
+        if RAG_ENABLED:
+            query_text = f"{subject} {body_text[:500]}"
+            rag_context = retrieve_context(query_text)
+
+        # Draft reply
+        reply = draft_email_reply(llm, message, headers, body_text, rag_context=rag_context)
+
+        # Create draft
+        thread_id = message.get("threadId")
+        reply_to = from_addr.split("<")[-1].split(">")[0].strip() if "<" in from_addr else from_addr
+        original_message_id = headers.get("message-id") or (f"<{message_id}@mail.gmail.com>" if message_id else None)
+        draft_id = create_gmail_draft(
+            creds,
+            email_address,
+            reply,
+            subject,
+            thread_id,
+            reply_to_address=reply_to,
+            original_message_id=original_message_id,
+        )
+
+        print(f"Created draft {draft_id} for email {email_address} (messageId={message_id}, historyId={history_id})", flush=True)
+        return {"status": "ok", "draft_id": draft_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process notification: {str(e)}") from e
 
 
 @app.post("/agent/process-unread", response_model=ProcessUnreadResponse)
