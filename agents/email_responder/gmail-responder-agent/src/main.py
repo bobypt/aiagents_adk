@@ -521,12 +521,19 @@ def get_credentials_for_email(email: str) -> Credentials:
         pass
 
     # If neither works, raise error
-    raise NotImplementedError(
-        f"Gmail API credentials not configured for {email}. "
-        "Set env: GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, and either "
-        f"Secret Manager '{REFRESH_TOKEN_SECRET_NAME}' containing {{email, refresh_token}} "
-        f"or GMAIL_REFRESH_TOKEN_{email.replace('@', '_').replace('.', '_')}."
+    missing_parts: List[str] = []
+    if not client_id or not client_secret:
+        missing_parts.append("OAuth client (client_id/client_secret)")
+    if not refresh_token and not os.environ.get(f\"GMAIL_REFRESH_TOKEN_{email.replace('@', '_').replace('.', '_')}\"):
+        missing_parts.append("refresh token (Secret Manager entry or per-email env)")
+    detail = (
+        f"Gmail API credentials not configured for {email}. Missing: {', '.join(missing_parts)}. "
+        f"Expected either Secret Manager '{REFRESH_TOKEN_SECRET_NAME}' with "
+        f"{{\"email\":\"{email}\",\"refresh_token\":\"...\"}} and OAuth client via "
+        f"OAUTH_CLIENT_SECRET_NAME='{OAUTH_CLIENT_SECRET_NAME or ''}', "
+        f"or per-email env GMAIL_REFRESH_TOKEN_{email.replace('@', '_').replace('.', '_')}."
     )
+    raise NotImplementedError(detail)
 
 
 @app.get("/", response_model=HealthResponse)
