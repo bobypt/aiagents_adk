@@ -592,7 +592,12 @@ def _fetch_message_by_hint(
         return gmail.users().messages().get(userId=email, id=message_id, format="full").execute()
     if not history_id:
         raise ValueError("historyId is required when messageId is missing")
-    history = gmail.users().history().list(userId=email, startHistoryId=history_id, historyTypes=["MESSAGE_ADDED"]).execute()
+    # Use correct allowed values for historyTypes per Gmail API
+    history = gmail.users().history().list(
+        userId=email,
+        startHistoryId=history_id,
+        historyTypes=["messageAdded"]
+    ).execute()
     histories = history.get("history", [])
     for entry in histories:
         for added in entry.get("messagesAdded", []):
@@ -656,13 +661,18 @@ async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] =
             rag_context = retrieve_context(query_text)
             print(f"/pubsub/push: RAG results count={len(rag_context) if rag_context else 0}", flush=True)
 
+        # Idempotency: skip if a draft already exists for this thread
+        thread_id = message.get("threadId")
+        if thread_id and check_existing_draft(creds, email_address, thread_id):
+            print(f"/pubsub/push: draft already exists for thread {thread_id}, skipping", flush=True)
+            return {"status": "ok", "skipped": "draft_exists", "threadId": thread_id}
+
         # Draft reply
         print("/pubsub/push: drafting reply...", flush=True)
         reply = draft_email_reply(llm, message, headers, body_text, rag_context=rag_context)
         print(f"/pubsub/push: draft generated length={len(reply)}", flush=True)
 
         # Create draft
-        thread_id = message.get("threadId")
         reply_to = from_addr.split("<")[-1].split(">")[0].strip() if "<" in from_addr else from_addr
         original_message_id = headers.get("message-id") or (f"<{message_id}@mail.gmail.com>" if message_id else None)
         print(f"/pubsub/push: creating Gmail draft to='{reply_to}' threadId={thread_id} has_msgid={bool(original_message_id)}", flush=True)
