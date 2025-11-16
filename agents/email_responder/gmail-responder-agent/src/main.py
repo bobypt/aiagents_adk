@@ -28,6 +28,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 REFRESH_TOKEN_SECRET_NAME = os.environ.get("REFRESH_TOKEN_SECRET_NAME", "gmail-refresh-tokens")
 OAUTH_CLIENT_SECRET_NAME = os.environ.get("OAUTH_CLIENT_SECRET_NAME")  # e.g., gmail-oauth-client
+WATCH_STATE_SECRET_NAME = os.environ.get("WATCH_STATE_SECRET_NAME", "gmail-watch-state")  # stores last_history_id per email
 
 # RAG Configuration (optional)
 VERTEX_INDEX_ENDPOINT = os.environ.get("VERTEX_INDEX_ENDPOINT")
@@ -156,6 +157,68 @@ def _get_refresh_token_from_secret(email: str) -> Optional[str]:
         if entry.get("email") == email:
             return entry.get("refresh_token")
     return None
+
+
+def _ensure_secret_exists(secret_id: str) -> None:
+    """Create a secret if it does not exist (idempotent)."""
+    if not PROJECT_ID:
+        return
+    client = get_secret_client()
+    parent = f"projects/{PROJECT_ID}"
+    try:
+        client.create_secret(
+            request={
+                "parent": parent,
+                "secret_id": secret_id,
+                "secret": {"replication": {"automatic": {}}},
+            }
+        )
+        print(f"_ensure_secret_exists: created secret {secret_id}", flush=True)
+    except Exception as e:
+        # Already exists or no permission to create; ignore
+        pass
+
+
+def _get_last_history_id(email: str) -> Optional[str]:
+    """Read last processed historyId for an email from Secret Manager."""
+    if not PROJECT_ID:
+        return None
+    name = f"projects/{PROJECT_ID}/secrets/{WATCH_STATE_SECRET_NAME}/versions/latest"
+    client = get_secret_client()
+    try:
+        resp = client.access_secret_version(name=name)
+        payload = resp.payload.data.decode("utf-8")
+        try:
+            recorded = json.loads(payload)
+            # support either single dict or list of dicts
+            if isinstance(recorded, dict):
+                if recorded.get("email") == email:
+                    return recorded.get("last_history_id")
+                return None
+            if isinstance(recorded, list):
+                for item in recorded:
+                    if isinstance(item, dict) and item.get("email") == email:
+                        return item.get("last_history_id")
+        except Exception:
+            return None
+    except Exception:
+        return None
+    return None
+
+
+def _set_last_history_id(email: str, history_id: str) -> None:
+    """Write last processed historyId for an email to Secret Manager (append as latest version)."""
+    if not PROJECT_ID or not history_id:
+        return
+    _ensure_secret_exists(WATCH_STATE_SECRET_NAME)
+    client = get_secret_client()
+    parent = f"projects/{PROJECT_ID}/secrets/{WATCH_STATE_SECRET_NAME}"
+    payload = json.dumps({"email": email, "last_history_id": str(history_id)}).encode("utf-8")
+    try:
+        client.add_secret_version(request={"parent": parent, "payload": {"data": payload}})
+        print(f"_set_last_history_id: updated last_history_id={history_id} for {email}", flush=True)
+    except Exception as e:
+        print(f"_set_last_history_id: failed to update: {type(e).__name__}: {str(e)}", flush=True)
 
 
 def _load_oauth_client_from_secret() -> Optional[Dict[str, Any]]:
@@ -605,8 +668,37 @@ def _fetch_message_by_hint(
     raise RuntimeError("No recent messages found for provided historyId")
 
 
+def _list_new_message_ids_since(
+    creds: Credentials,
+    email: str,
+    start_history_id: str,
+) -> List[str]:
+    """List message IDs added since start_history_id."""
+    gmail = build("gmail", "v1", credentials=creds)
+    message_ids: List[str] = []
+    page_token = None
+    while True:
+        req = {
+            "userId": email,
+            "startHistoryId": start_history_id,
+            "historyTypes": ["messageAdded"],
+        }
+        if page_token:
+            req["pageToken"] = page_token
+        resp = gmail.users().history().list(**req).execute()
+        for entry in resp.get("history", []):
+            for added in entry.get("messagesAdded", []):
+                mid = added.get("message", {}).get("id")
+                if mid:
+                    message_ids.append(mid)
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return message_ids
+
+
 @app.post("/pubsub/push")
-async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] = Header(default=None)) -> Dict[str, str]:
+async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     """
     Minimal Pub/Sub push handler for Gmail watch notifications.
     Note: For simplicity, token verification is not implemented here.
@@ -617,27 +709,34 @@ async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] =
     if envelope_data:
         print(f"/pubsub/push: envelope_data length={len(envelope_data)} (base64)", flush=True)
     if not envelope_data:
-        raise HTTPException(status_code=400, detail="Missing message data")
+        print("/pubsub/push: missing message data; acknowledging", flush=True)
+        return {"status": "ok", "skipped": "no_message_data"}
     try:
         decoded_json = base64.b64decode(envelope_data).decode("utf-8")
         print(f"/pubsub/push: decoded JSON (truncated 200 chars)={decoded_json[:200]}", flush=True)
         decoded = json.loads(decoded_json)
     except Exception:
         print("/pubsub/push: failed to decode Pub/Sub data as JSON", flush=True)
-        raise HTTPException(status_code=400, detail="Invalid message data")
+        return {"status": "ok", "skipped": "invalid_message_data"}
 
     email_address = decoded.get("emailAddress")
     message_id = decoded.get("messageId")
     history_id = decoded.get("historyId")
 
     if not email_address:
-        raise HTTPException(status_code=400, detail="Missing email address in notification")
+        print("/pubsub/push: missing email address in notification; acknowledging", flush=True)
+        return {"status": "ok", "skipped": "missing_email"}
 
     try:
         # Resolve credentials for this email
         print(f"/pubsub/push: resolving credentials for email={email_address}", flush=True)
         creds = get_credentials_for_email(email_address)
         print(f"/pubsub/push: credentials resolved for {email_address}", flush=True)
+
+        # Process only when messageId is present; otherwise ack and skip
+        if not message_id:
+            print(f"/pubsub/push: no messageId provided (historyId={history_id}), acknowledging without action", flush=True)
+            return {"status": "ok", "skipped": "no_message_id", "historyId": history_id}
 
         # Initialize LangChain model
         llm = get_llm()
@@ -706,7 +805,8 @@ async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] =
         tb = traceback.format_exc()
         print(f"/pubsub/push: ERROR {type(e).__name__}: {str(e)}", flush=True)
         print(tb, flush=True)
-        raise HTTPException(status_code=500, detail=f"Failed to process notification: {str(e)}") from e
+        # Always ack to avoid retries; surface error in response body
+        return {"status": "ok", "skipped": "error", "error": str(e)}
 
 
 @app.post("/agent/process-unread", response_model=ProcessUnreadResponse)
