@@ -49,6 +49,19 @@ export PROJECT_ID=loanstax-agentic-ai
 export REGION=us-central1  # optional, defaults to us-central1
 export SERVICE_NAME=gmail-agent  # optional, defaults to gmail-agent
 
+export GEMINI_MODEL=gemini-2.5-flash
+export GEMINI_API_KEY=TODO
+
+export REFRESH_TOKEN_SECRET_NAME=gmail-refresh-tokens
+export OAUTH_CLIENT_SECRET_NAME=gmail-oauth-client
+
+
+# RAG settings
+export VERTEX_EMBEDDING_MODEL="text-embedding-004"
+export VERTEX_INDEX_ENDPOINT="$(gcloud ai index-endpoints list --region=us-central1 --format='value(name,displayName)' | grep -i 'gmail' | awk '{print $1}' | head -1)"
+export VERTEX_DEPLOYED_INDEX_ID="$(gcloud ai index-endpoints describe "$VERTEX_INDEX_ENDPOINT" --region=us-central1 --format='value(deployedIndexes[0].id)')"
+
+
 ./deploy.sh
 ```
 
@@ -128,19 +141,31 @@ curl -X POST "https://gmail-agent-72679510753.us-central1.run.app/agent/process-
 
 ### Environment Variables
 
-For the `/agent/process-unread` endpoint to work, you need to configure Gmail API credentials:
+For the `/agent/process-unread` and `/pubsub/push` to work, configure Gmail API credentials:
 
 1. **Gmail OAuth Credentials** (set in Cloud Run):
    ```bash
    GMAIL_CLIENT_ID=your-client-id
    GMAIL_CLIENT_SECRET=your-client-secret
    GMAIL_TOKEN_URI=https://oauth2.googleapis.com/token  # optional, defaults to this
-   GMAIL_REFRESH_TOKEN_hello_kagence_ai=your-refresh-token
    ```
 
-   Note: The refresh token environment variable name is based on the email address:
-   - Email: `hello@kagence.ai` → Variable: `GMAIL_REFRESH_TOKEN_hello_kagence_ai`
-   - Replace `@` with `_` and `.` with `_`
+   Refresh tokens are preferably read from Secret Manager:
+   ```bash
+   REFRESH_TOKEN_SECRET_NAME=gmail-refresh-tokens  # optional, default: gmail-refresh-tokens
+   PROJECT_ID=your-gcp-project-id
+   OAUTH_CLIENT_SECRET_NAME=gmail-oauth-client     # optional; secret containing OAuth client JSON
+   ```
+   - Secret payload format (each enabled version):
+     - For refresh tokens: `{"email":"user@example.com","refresh_token":"..."}`
+     - For OAuth client: supports either
+       `{"installed":{...}}` or `{"web":{...}}` or just the inner object, containing at least `client_id`, `client_secret`, `token_uri`.
+   - The agent matches the Gmail notification `emailAddress` to pick the token.
+
+   Dev fallback (optional): You can still define a per-email env var instead of Secret Manager:
+   ```bash
+   GMAIL_REFRESH_TOKEN_hello_kagence_ai=your-refresh-token  # email with @ and . replaced by _
+   ```
 
 2. **Gemini API Key** (for LangChain):
    ```bash
@@ -182,7 +207,7 @@ After deployment, set environment variables. You can do this in one of two ways:
 gcloud run services update gmail-agent \
   --project=$PROJECT_ID \
   --region=$REGION \
-  --update-env-vars="GEMINI_API_KEY=your-key,GMAIL_CLIENT_ID=your-id,GMAIL_CLIENT_SECRET=your-secret,GMAIL_REFRESH_TOKEN_hello_kagence_ai=your-token"
+  --update-env-vars="GEMINI_API_KEY=your-key,REFRESH_TOKEN_SECRET_NAME=gmail-refresh-tokens,OAUTH_CLIENT_SECRET_NAME=gmail-oauth-client,PROJECT_ID=$PROJECT_ID"
 ```
 
 **Option 2: Multiple commands (update one variable at a time):**
@@ -206,7 +231,7 @@ gcloud run services update gmail-agent \
 gcloud run services update gmail-agent \
   --project=$PROJECT_ID \
   --region=$REGION \
-  --update-env-vars="GMAIL_REFRESH_TOKEN_hello_kagence_ai=your-token"
+  --update-env-vars="REFRESH_TOKEN_SECRET_NAME=gmail-refresh-tokens,OAUTH_CLIENT_SECRET_NAME=gmail-oauth-client,PROJECT_ID=$PROJECT_ID"
 ```
 
 **Option 3: Using --set-env-vars (replaces all existing env vars):**

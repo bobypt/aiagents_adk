@@ -11,6 +11,7 @@ import google.auth.transport.requests
 from fastapi import FastAPI, HTTPException
 from fastapi import Header
 from google.cloud import aiplatform
+from google.cloud import secretmanager
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -25,6 +26,8 @@ PROJECT_ID = os.environ.get("PROJECT_ID")
 LOCATION = os.environ.get("LOCATION", "us-central1")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+REFRESH_TOKEN_SECRET_NAME = os.environ.get("REFRESH_TOKEN_SECRET_NAME", "gmail-refresh-tokens")
+OAUTH_CLIENT_SECRET_NAME = os.environ.get("OAUTH_CLIENT_SECRET_NAME")  # e.g., gmail-oauth-client
 
 # RAG Configuration (optional)
 VERTEX_INDEX_ENDPOINT = os.environ.get("VERTEX_INDEX_ENDPOINT")
@@ -89,6 +92,65 @@ _llm = None
 # Initialize Vertex AI for RAG
 _vertex_initialized = False
 _embedding_model = None
+_secret_client: secretmanager.SecretManagerServiceClient | None = None
+
+
+def get_secret_client() -> secretmanager.SecretManagerServiceClient:
+    global _secret_client
+    if _secret_client is None:
+        _secret_client = secretmanager.SecretManagerServiceClient()
+    return _secret_client
+
+
+def _iter_refresh_token_entries() -> List[Dict[str, Any]]:
+    if not PROJECT_ID:
+        raise RuntimeError("PROJECT_ID must be set to read secrets")
+    parent = f"projects/{PROJECT_ID}/secrets/{REFRESH_TOKEN_SECRET_NAME}"
+    client = get_secret_client()
+    entries: List[Dict[str, Any]] = []
+    try:
+        for version in client.list_secret_versions(request={"parent": parent}):
+            if version.state.name != "ENABLED":
+                continue
+            resp = client.access_secret_version(name=version.name)
+            try:
+                entries.append(json.loads(resp.payload.data.decode("utf-8")))
+            except Exception:
+                continue
+    except Exception:
+        # Secret may not exist yet
+        return []
+    return entries
+
+
+def _get_refresh_token_from_secret(email: str) -> Optional[str]:
+    tokens = _iter_refresh_token_entries()
+    for entry in tokens:
+        if entry.get("email") == email:
+            return entry.get("refresh_token")
+    return None
+
+
+def _load_oauth_client_from_secret() -> Optional[Dict[str, Any]]:
+    """
+    Load OAuth client JSON from Secret Manager when OAUTH_CLIENT_SECRET_NAME is set.
+    Supports both 'installed' and 'web' formats; returns the nested dict.
+    """
+    if not OAUTH_CLIENT_SECRET_NAME or not PROJECT_ID:
+        return None
+    name = f"projects/{PROJECT_ID}/secrets/{OAUTH_CLIENT_SECRET_NAME}/versions/latest"
+    try:
+        client = get_secret_client()
+        resp = client.access_secret_version(name=name)
+        data = json.loads(resp.payload.data.decode("utf-8"))
+        if "installed" in data and isinstance(data["installed"], dict):
+            return data["installed"]
+        if "web" in data and isinstance(data["web"], dict):
+            return data["web"]
+        # If it's already the inner object
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
 def get_llm():
@@ -401,14 +463,16 @@ def create_gmail_draft(
 def get_credentials_for_email(email: str) -> Credentials:
     """
     Get Gmail API credentials for an email address.
-    Uses Application Default Credentials or OAuth refresh tokens from environment.
-    For now, supports simple OAuth refresh token via environment variable.
+    Prefers OAuth refresh tokens stored in Secret Manager (REFRESH_TOKEN_SECRET_NAME).
+    Falls back to environment variables for development.
     """
-    # Option 1: Use refresh token from environment variable (simple, no security for dev)
-    refresh_token = os.environ.get(f"GMAIL_REFRESH_TOKEN_{email.replace('@', '_').replace('.', '_')}")
-    client_id = os.environ.get("GMAIL_CLIENT_ID")
-    client_secret = os.environ.get("GMAIL_CLIENT_SECRET")
-    token_uri = os.environ.get("GMAIL_TOKEN_URI", "https://oauth2.googleapis.com/token")
+    # Option 1: Secret Manager
+    refresh_token = _get_refresh_token_from_secret(email)
+    # Load client credentials from Secret Manager (preferred) or env
+    client_json = _load_oauth_client_from_secret()
+    client_id = (client_json or {}).get("client_id") or os.environ.get("GMAIL_CLIENT_ID")
+    client_secret = (client_json or {}).get("client_secret") or os.environ.get("GMAIL_CLIENT_SECRET")
+    token_uri = (client_json or {}).get("token_uri") or os.environ.get("GMAIL_TOKEN_URI", "https://oauth2.googleapis.com/token")
 
     if refresh_token and client_id and client_secret:
         creds = Credentials(
@@ -422,7 +486,21 @@ def get_credentials_for_email(email: str) -> Credentials:
         creds.refresh(google.auth.transport.requests.Request())
         return creds
 
-    # Option 2: Try Application Default Credentials (for service accounts with domain-wide delegation)
+    # Option 2: Use refresh token from environment variable (simple, dev)
+    refresh_token_env = os.environ.get(f"GMAIL_REFRESH_TOKEN_{email.replace('@', '_').replace('.', '_')}")
+    if refresh_token_env and client_id and client_secret:
+        creds = Credentials(
+            None,
+            refresh_token=refresh_token_env,
+            token_uri=token_uri,
+            client_id=client_id,
+            client_secret=client_secret,
+            scopes=SCOPES,
+        )
+        creds.refresh(google.auth.transport.requests.Request())
+        return creds
+
+    # Option 3: Try Application Default Credentials (for service accounts with domain-wide delegation)
     try:
         creds, project = google.auth.default(scopes=SCOPES)
         if isinstance(creds, Credentials):
@@ -433,8 +511,9 @@ def get_credentials_for_email(email: str) -> Credentials:
     # If neither works, raise error
     raise NotImplementedError(
         f"Gmail API credentials not configured for {email}. "
-        "Set environment variables: GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, "
-        f"and GMAIL_REFRESH_TOKEN_{email.replace('@', '_').replace('.', '_')}"
+        "Set env: GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, and either "
+        f"Secret Manager '{REFRESH_TOKEN_SECRET_NAME}' containing {{email, refresh_token}} "
+        f"or GMAIL_REFRESH_TOKEN_{email.replace('@', '_').replace('.', '_')}."
     )
 
 
