@@ -473,8 +473,10 @@ def get_credentials_for_email(email: str) -> Credentials:
     client_id = (client_json or {}).get("client_id") or os.environ.get("GMAIL_CLIENT_ID")
     client_secret = (client_json or {}).get("client_secret") or os.environ.get("GMAIL_CLIENT_SECRET")
     token_uri = (client_json or {}).get("token_uri") or os.environ.get("GMAIL_TOKEN_URI", "https://oauth2.googleapis.com/token")
+    print(f"get_credentials_for_email: client_json_loaded={bool(client_json)} token_from_secret={bool(refresh_token)}", flush=True)
 
     if refresh_token and client_id and client_secret:
+        print("get_credentials_for_email: building Credentials from Secret Manager token", flush=True)
         creds = Credentials(
             None,
             refresh_token=refresh_token,
@@ -483,12 +485,17 @@ def get_credentials_for_email(email: str) -> Credentials:
             client_secret=client_secret,
             scopes=SCOPES,
         )
-        creds.refresh(google.auth.transport.requests.Request())
+        try:
+            creds.refresh(google.auth.transport.requests.Request())
+            print("get_credentials_for_email: refreshed access token using secret refresh_token", flush=True)
+        except Exception as e:
+            print(f"get_credentials_for_email: ERROR refreshing token from secret: {type(e).__name__}: {str(e)}", flush=True)
         return creds
 
     # Option 2: Use refresh token from environment variable (simple, dev)
     refresh_token_env = os.environ.get(f"GMAIL_REFRESH_TOKEN_{email.replace('@', '_').replace('.', '_')}")
     if refresh_token_env and client_id and client_secret:
+        print("get_credentials_for_email: building Credentials from env refresh token", flush=True)
         creds = Credentials(
             None,
             refresh_token=refresh_token_env,
@@ -497,13 +504,18 @@ def get_credentials_for_email(email: str) -> Credentials:
             client_secret=client_secret,
             scopes=SCOPES,
         )
-        creds.refresh(google.auth.transport.requests.Request())
+        try:
+            creds.refresh(google.auth.transport.requests.Request())
+            print("get_credentials_for_email: refreshed access token using env refresh token", flush=True)
+        except Exception as e:
+            print(f"get_credentials_for_email: ERROR refreshing token from env: {type(e).__name__}: {str(e)}", flush=True)
         return creds
 
     # Option 3: Try Application Default Credentials (for service accounts with domain-wide delegation)
     try:
         creds, project = google.auth.default(scopes=SCOPES)
         if isinstance(creds, Credentials):
+            print("get_credentials_for_email: using Application Default Credentials", flush=True)
             return creds
     except Exception:
         pass
@@ -562,11 +574,17 @@ async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] =
     """
     attributes = body.message.get("attributes", {})
     envelope_data = body.message.get("data")
+    print(f"/pubsub/push: received message with attributes keys={list(attributes.keys()) if isinstance(attributes, dict) else type(attributes)}", flush=True)
+    if envelope_data:
+        print(f"/pubsub/push: envelope_data length={len(envelope_data)} (base64)", flush=True)
     if not envelope_data:
         raise HTTPException(status_code=400, detail="Missing message data")
     try:
-        decoded = json.loads(base64.b64decode(envelope_data).decode("utf-8"))
+        decoded_json = base64.b64decode(envelope_data).decode("utf-8")
+        print(f"/pubsub/push: decoded JSON (truncated 200 chars)={decoded_json[:200]}", flush=True)
+        decoded = json.loads(decoded_json)
     except Exception:
+        print("/pubsub/push: failed to decode Pub/Sub data as JSON", flush=True)
         raise HTTPException(status_code=400, detail="Invalid message data")
 
     email_address = decoded.get("emailAddress")
@@ -578,31 +596,42 @@ async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] =
 
     try:
         # Resolve credentials for this email
+        print(f"/pubsub/push: resolving credentials for email={email_address}", flush=True)
         creds = get_credentials_for_email(email_address)
+        print(f"/pubsub/push: credentials resolved for {email_address}", flush=True)
 
         # Initialize LangChain model
         llm = get_llm()
+        print("/pubsub/push: LLM initialized", flush=True)
 
         # Fetch message
+        print(f"/pubsub/push: fetching message (messageId={message_id}, historyId={history_id})", flush=True)
         message = _fetch_message_by_hint(creds, email_address, message_id, history_id)
+        print(f"/pubsub/push: fetched message id={message.get('id')} threadId={message.get('threadId')}", flush=True)
         headers = extract_headers(message)
         subject = headers.get("subject", "No Subject")
         from_addr = headers.get("from", "Unknown")
         body_text = extract_email_body(message)
+        print(f"/pubsub/push: extracted headers subject='{subject}' from='{from_addr}' body_len={len(body_text)}", flush=True)
 
         # Retrieve RAG context (optional)
         rag_context = None
         if RAG_ENABLED:
             query_text = f"{subject} {body_text[:500]}"
+            print("/pubsub/push: retrieving RAG context...", flush=True)
             rag_context = retrieve_context(query_text)
+            print(f"/pubsub/push: RAG results count={len(rag_context) if rag_context else 0}", flush=True)
 
         # Draft reply
+        print("/pubsub/push: drafting reply...", flush=True)
         reply = draft_email_reply(llm, message, headers, body_text, rag_context=rag_context)
+        print(f"/pubsub/push: draft generated length={len(reply)}", flush=True)
 
         # Create draft
         thread_id = message.get("threadId")
         reply_to = from_addr.split("<")[-1].split(">")[0].strip() if "<" in from_addr else from_addr
         original_message_id = headers.get("message-id") or (f"<{message_id}@mail.gmail.com>" if message_id else None)
+        print(f"/pubsub/push: creating Gmail draft to='{reply_to}' threadId={thread_id} has_msgid={bool(original_message_id)}", flush=True)
         draft_id = create_gmail_draft(
             creds,
             email_address,
@@ -616,6 +645,10 @@ async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] =
         print(f"Created draft {draft_id} for email {email_address} (messageId={message_id}, historyId={history_id})", flush=True)
         return {"status": "ok", "draft_id": draft_id}
     except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"/pubsub/push: ERROR {type(e).__name__}: {str(e)}", flush=True)
+        print(tb, flush=True)
         raise HTTPException(status_code=500, detail=f"Failed to process notification: {str(e)}") from e
 
 
