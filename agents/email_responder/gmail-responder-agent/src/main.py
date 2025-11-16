@@ -524,7 +524,7 @@ def get_credentials_for_email(email: str) -> Credentials:
     missing_parts: List[str] = []
     if not client_id or not client_secret:
         missing_parts.append("OAuth client (client_id/client_secret)")
-    if not refresh_token and not os.environ.get(f\"GMAIL_REFRESH_TOKEN_{email.replace('@', '_').replace('.', '_')}\"):
+    if not refresh_token and not os.environ.get(f"GMAIL_REFRESH_TOKEN_{email.replace('@', '_').replace('.', '_')}"):
         missing_parts.append("refresh token (Secret Manager entry or per-email env)")
     detail = (
         f"Gmail API credentials not configured for {email}. Missing: {', '.join(missing_parts)}. "
