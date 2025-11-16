@@ -653,6 +653,19 @@ async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] =
         body_text = extract_email_body(message)
         print(f"/pubsub/push: extracted headers subject='{subject}' from='{from_addr}' body_len={len(body_text)}", flush=True)
 
+        # Skip drafts/sent to avoid loops (Pub/Sub can notify on our own draft creation)
+        label_ids = message.get("labelIds", []) or []
+        if "DRAFT" in label_ids:
+            print(f"/pubsub/push: skipping because message has DRAFT label (id={message.get('id')})", flush=True)
+            return {"status": "ok", "skipped": "is_draft", "messageId": message.get("id")}
+        if "SENT" in label_ids:
+            print(f"/pubsub/push: skipping because message has SENT label (id={message.get('id')})", flush=True)
+            return {"status": "ok", "skipped": "is_sent", "messageId": message.get("id")}
+        # Also skip if the message appears authored by the watched address
+        if email_address.lower() in (from_addr or "").lower():
+            print(f"/pubsub/push: skipping because from_addr matches watched email ({email_address})", flush=True)
+            return {"status": "ok", "skipped": "self_authored", "messageId": message.get("id")}
+
         # Retrieve RAG context (optional)
         rag_context = None
         if RAG_ENABLED:
