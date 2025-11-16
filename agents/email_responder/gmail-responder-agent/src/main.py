@@ -105,21 +105,48 @@ def get_secret_client() -> secretmanager.SecretManagerServiceClient:
 def _iter_refresh_token_entries() -> List[Dict[str, Any]]:
     if not PROJECT_ID:
         raise RuntimeError("PROJECT_ID must be set to read secrets")
-    parent = f"projects/{PROJECT_ID}/secrets/{REFRESH_TOKEN_SECRET_NAME}"
     client = get_secret_client()
     entries: List[Dict[str, Any]] = []
+    # First, try accessing 'latest' directly (works with roles/secretmanager.secretAccessor)
+    latest_name = f"projects/{PROJECT_ID}/secrets/{REFRESH_TOKEN_SECRET_NAME}/versions/latest"
+    try:
+        resp = client.access_secret_version(name=latest_name)
+        payload = resp.payload.data.decode("utf-8")
+        try:
+            parsed = json.loads(payload)
+            if isinstance(parsed, dict):
+                entries.append(parsed)
+                return entries
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict):
+                        entries.append(item)
+                return entries
+        except Exception:
+            pass
+    except Exception as e:
+        # Log and fall back to listing (if permitted)
+        print(f"_iter_refresh_token_entries: access latest failed: {type(e).__name__}: {str(e)}", flush=True)
+    # Fallback: list versions (requires additional list permissions)
+    parent = f"projects/{PROJECT_ID}/secrets/{REFRESH_TOKEN_SECRET_NAME}"
     try:
         for version in client.list_secret_versions(request={"parent": parent}):
-            if version.state.name != "ENABLED":
+            if getattr(version, "state", None) and getattr(version.state, "name", "") != "ENABLED":
                 continue
-            resp = client.access_secret_version(name=version.name)
             try:
-                entries.append(json.loads(resp.payload.data.decode("utf-8")))
-            except Exception:
+                resp = client.access_secret_version(name=version.name)
+                parsed = json.loads(resp.payload.data.decode("utf-8"))
+                if isinstance(parsed, dict):
+                    entries.append(parsed)
+                elif isinstance(parsed, list):
+                    for item in parsed:
+                        if isinstance(item, dict):
+                            entries.append(item)
+            except Exception as inner:
+                print(f"_iter_refresh_token_entries: skip version due to error: {type(inner).__name__}: {str(inner)}", flush=True)
                 continue
-    except Exception:
-        # Secret may not exist yet
-        return []
+    except Exception as e:
+        print(f"_iter_refresh_token_entries: list versions failed: {type(e).__name__}: {str(e)}", flush=True)
     return entries
 
 
