@@ -434,19 +434,28 @@ def check_existing_draft(
     email: str,
     thread_id: Optional[str],
 ) -> bool:
-    """Check if a draft already exists for this thread."""
+    """Check if a draft already exists for this thread by scanning drafts."""
     if not thread_id:
         return False
 
     gmail = build("gmail", "v1", credentials=creds)
     try:
-        drafts = gmail.users().drafts().list(
-            userId=email,
-            q=f"in:thread:{thread_id}",
-        ).execute()
-        return len(drafts.get("drafts", [])) > 0
+        page_token = None
+        while True:
+            req = {"userId": email, "maxResults": 50}
+            if page_token:
+                req["pageToken"] = page_token
+            resp = gmail.users().drafts().list(**req).execute()
+            for draft in resp.get("drafts", []) or []:
+                msg = draft.get("message", {}) or {}
+                if msg.get("threadId") == thread_id:
+                    return True
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
     except Exception:
-        return False
+        pass
+    return False
 
 
 def draft_email_reply(
@@ -719,6 +728,12 @@ async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] =
         print("/pubsub/push: failed to decode Pub/Sub data as JSON", flush=True)
         return {"status": "ok", "skipped": "invalid_message_data"}
 
+    # Log full decoded message (safe fields only)
+    try:
+        print(f"/pubsub/push: decoded payload full={json.dumps(decoded)}", flush=True)
+    except Exception:
+        print("/pubsub/push: could not serialize decoded payload for logging", flush=True)
+
     email_address = decoded.get("emailAddress")
     message_id = decoded.get("messageId")
     history_id = decoded.get("historyId")
@@ -733,10 +748,64 @@ async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] =
         creds = get_credentials_for_email(email_address)
         print(f"/pubsub/push: credentials resolved for {email_address}", flush=True)
 
-        # Process only when messageId is present; otherwise ack and skip
+        # If no messageId, process up to last 5 unread emails (best-effort)
         if not message_id:
-            print(f"/pubsub/push: no messageId provided (historyId={history_id}), acknowledging without action", flush=True)
-            return {"status": "ok", "skipped": "no_message_id", "historyId": history_id}
+            print(f"/pubsub/push: no messageId (historyId={history_id}); processing last 5 unread emails", flush=True)
+            results = {"processed": 0, "succeeded": 0, "failed": 0, "skipped": 0}
+            try:
+                unread_messages = fetch_unread_messages(
+                    creds,
+                    email_address,
+                    max_results=5,
+                    label_ids=["UNREAD", "INBOX"],
+                )
+                print(f"/pubsub/push: fetched {len(unread_messages)} unread email(s) for fallback processing", flush=True)
+                llm = get_llm()
+                for msg in unread_messages:
+                    try:
+                        # Skip drafts/sent/self-authored
+                        labels = msg.get("labelIds", []) or []
+                        hdrs = extract_headers(msg)
+                        from_addr2 = hdrs.get("from", "") or ""
+                        if "DRAFT" in labels or "SENT" in labels or email_address.lower() in from_addr2.lower():
+                            results["skipped"] += 1
+                            continue
+                        # Idempotency: skip if draft already exists for thread
+                        t_id = msg.get("threadId")
+                        if t_id and check_existing_draft(creds, email_address, t_id):
+                            results["skipped"] += 1
+                            continue
+                        subject2 = hdrs.get("subject", "No Subject")
+                        body2 = extract_email_body(msg)
+                        # Optional RAG
+                        rag_context = None
+                        if RAG_ENABLED:
+                            try:
+                                rag_context = retrieve_context(f"{subject2} {body2[:500]}")
+                            except Exception:
+                                rag_context = None
+                        reply2 = draft_email_reply(llm, msg, hdrs, body2, rag_context=rag_context)
+                        reply_to2 = from_addr2.split("<")[-1].split(">")[0].strip() if "<" in from_addr2 else from_addr2
+                        orig_msg_id2 = hdrs.get("message-id") or (f"<{msg.get('id')}@mail.gmail.com>")
+                        create_gmail_draft(
+                            creds,
+                            email_address,
+                            reply2,
+                            subject2,
+                            t_id,
+                            reply_to_address=reply_to2,
+                            original_message_id=orig_msg_id2,
+                        )
+                        results["processed"] += 1
+                        results["succeeded"] += 1
+                    except Exception as inner_e:
+                        print(f"/pubsub/push: fallback processing error for msg {msg.get('id')}: {str(inner_e)}", flush=True)
+                        results["processed"] += 1
+                        results["failed"] += 1
+                return {"status": "ok", "mode": "fallback_unread", "historyId": history_id, **results}
+            except Exception as e:
+                print(f"/pubsub/push: fallback unread processing failed: {type(e).__name__}: {str(e)}", flush=True)
+                return {"status": "ok", "mode": "fallback_unread", "historyId": history_id, "error": str(e)}
 
         # Initialize LangChain model
         llm = get_llm()

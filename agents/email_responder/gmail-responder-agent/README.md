@@ -285,3 +285,12 @@ gmail-agent/
 - Cloud Run enabled in your GCP project
 - Gmail API OAuth credentials
 - Gemini API key
+
+
+# Pub-sub unread messages
+
+gcloud beta monitoring time-series list \
+  --project "$PROJECT_ID" \
+  --filter='metric.type="pubsub.googleapis.com/subscription/num_undelivered_messages" AND resource.labels.subscription_id="gmail-notifications-push"' \
+  --format='table(points[0].value, resource.labels.subscription_id)' \
+  --limit=1
