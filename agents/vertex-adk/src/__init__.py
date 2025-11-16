@@ -1,1 +1,0 @@
-# Vertex ADK Agent package

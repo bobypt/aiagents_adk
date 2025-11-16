@@ -73,7 +73,7 @@ That's it! The script will:
 gcloud run services describe gmail-agent \
   --project=loanstax-agentic-ai \
   --region=us-central1 \
-  --format='json(spec.template.spec.containers[0].env)'\
+  --format='json(spec.template.spec.containers[0].env)'
 
 curl -X POST "https://gmail-agent-72679510753.us-central1.run.app/agent/process-unread" \
   -H "Content-Type: application/json" \
