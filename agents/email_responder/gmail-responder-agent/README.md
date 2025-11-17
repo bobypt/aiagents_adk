@@ -31,11 +31,24 @@ uv sync
 
 ### 2. Run locally
 
+**Prerequisites for local run:**
+- Authenticate with Google Cloud: `gcloud auth application-default login`
+- Set your default project: `gcloud config set project YOUR_PROJECT_ID` (or export `PROJECT_ID` env var)
+- The app will auto-detect `PROJECT_ID` from gcloud config or Application Default Credentials
+
 ```bash
+# Optional: Set PROJECT_ID explicitly (otherwise auto-detected from gcloud config)
+export PROJECT_ID=your-gcp-project-id
+
+# Required: Set your API keys and credentials
 export GEMINI_API_KEY=your-gemini-api-key
 export GMAIL_CLIENT_ID=your-client-id
 export GMAIL_CLIENT_SECRET=your-client-secret
 export GMAIL_REFRESH_TOKEN_hello_kagence_ai=your-refresh-token
+
+# Optional: If using Secret Manager (recommended)
+export REFRESH_TOKEN_SECRET_NAME=gmail-refresh-tokens
+export OAUTH_CLIENT_SECRET_NAME=gmail-oauth-client
 
 uv run python -m uvicorn  src.main:app --reload --port 8080
 

@@ -22,7 +22,38 @@ from vertexai.language_models import TextEmbeddingModel
 app = FastAPI(title="Gmail Agent API", version="0.1.0")
 
 # Configuration
-PROJECT_ID = os.environ.get("PROJECT_ID")
+def _get_project_id() -> Optional[str]:
+    """Get PROJECT_ID from environment, gcloud config, or Application Default Credentials."""
+    # First, try environment variable
+    project_id = os.environ.get("PROJECT_ID")
+    if project_id:
+        return project_id
+    
+    # Try to get from gcloud config
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["gcloud", "config", "get-value", "project"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    
+    # Try to get from Application Default Credentials
+    try:
+        creds, project = google.auth.default()
+        if project:
+            return project
+    except Exception:
+        pass
+    
+    return None
+
+PROJECT_ID = _get_project_id()
 LOCATION = os.environ.get("LOCATION", "us-central1")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
@@ -230,6 +261,7 @@ def _load_oauth_client_from_secret() -> Optional[Dict[str, Any]]:
     Supports both 'installed' and 'web' formats; returns the nested dict.
     """
     if not OAUTH_CLIENT_SECRET_NAME or not PROJECT_ID:
+        print(f"_load_oauth_client_from_secret: OAUTH_CLIENT_SECRET_NAME={OAUTH_CLIENT_SECRET_NAME}, PROJECT_ID={PROJECT_ID}", flush=True)
         return None
     name = f"projects/{PROJECT_ID}/secrets/{OAUTH_CLIENT_SECRET_NAME}/versions/latest"
     try:
@@ -237,12 +269,19 @@ def _load_oauth_client_from_secret() -> Optional[Dict[str, Any]]:
         resp = client.access_secret_version(name=name)
         data = json.loads(resp.payload.data.decode("utf-8"))
         if "installed" in data and isinstance(data["installed"], dict):
+            print(f"_load_oauth_client_from_secret: loaded 'installed' client config", flush=True)
             return data["installed"]
         if "web" in data and isinstance(data["web"], dict):
+            print(f"_load_oauth_client_from_secret: loaded 'web' client config", flush=True)
             return data["web"]
         # If it's already the inner object
-        return data if isinstance(data, dict) else None
-    except Exception:
+        if isinstance(data, dict):
+            print(f"_load_oauth_client_from_secret: loaded client config (direct dict)", flush=True)
+            return data
+        print(f"_load_oauth_client_from_secret: data is not a dict: {type(data)}", flush=True)
+        return None
+    except Exception as e:
+        print(f"_load_oauth_client_from_secret: error loading secret '{OAUTH_CLIENT_SECRET_NAME}': {type(e).__name__}: {str(e)}", flush=True)
         return None
 
 
@@ -659,6 +698,7 @@ def get_credentials_for_email(email: str) -> Credentials:
     client_secret = (client_json or {}).get("client_secret") or os.environ.get("GMAIL_CLIENT_SECRET")
     token_uri = (client_json or {}).get("token_uri") or os.environ.get("GMAIL_TOKEN_URI", "https://oauth2.googleapis.com/token")
     print(f"get_credentials_for_email: client_json_loaded={bool(client_json)} token_from_secret={bool(refresh_token)}", flush=True)
+    print(f"get_credentials_for_email: client_id={'SET' if client_id else 'MISSING'}, client_secret={'SET' if client_secret else 'MISSING'}, OAUTH_CLIENT_SECRET_NAME={OAUTH_CLIENT_SECRET_NAME}", flush=True)
 
     if refresh_token and client_id and client_secret:
         print("get_credentials_for_email: building Credentials from Secret Manager token", flush=True)
@@ -672,9 +712,14 @@ def get_credentials_for_email(email: str) -> Credentials:
         )
         try:
             creds.refresh(google.auth.transport.requests.Request())
-            print("get_credentials_for_email: refreshed access token using secret refresh_token", flush=True)
+            # Log the scopes that were actually granted
+            granted_scopes = getattr(creds, 'scopes', None) or []
+            print(f"get_credentials_for_email: refreshed access token using secret refresh_token. Granted scopes: {granted_scopes}", flush=True)
+            if not granted_scopes or set(granted_scopes) != set(SCOPES):
+                print(f"get_credentials_for_email: WARNING - Refresh token may not have all required scopes. Required: {SCOPES}, Granted: {granted_scopes}", flush=True)
         except Exception as e:
             print(f"get_credentials_for_email: ERROR refreshing token from secret: {type(e).__name__}: {str(e)}", flush=True)
+            raise
         return creds
 
     # Option 2: Use refresh token from environment variable (simple, dev)
@@ -691,9 +736,14 @@ def get_credentials_for_email(email: str) -> Credentials:
         )
         try:
             creds.refresh(google.auth.transport.requests.Request())
-            print("get_credentials_for_email: refreshed access token using env refresh token", flush=True)
+            # Log the scopes that were actually granted
+            granted_scopes = getattr(creds, 'scopes', None) or []
+            print(f"get_credentials_for_email: refreshed access token using env refresh token. Granted scopes: {granted_scopes}", flush=True)
+            if not granted_scopes or set(granted_scopes) != set(SCOPES):
+                print(f"get_credentials_for_email: WARNING - Refresh token may not have all required scopes. Required: {SCOPES}, Granted: {granted_scopes}", flush=True)
         except Exception as e:
             print(f"get_credentials_for_email: ERROR refreshing token from env: {type(e).__name__}: {str(e)}", flush=True)
+            raise
         return creds
 
     # Option 3: Try Application Default Credentials (for service accounts with domain-wide delegation)
