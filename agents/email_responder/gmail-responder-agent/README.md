@@ -25,7 +25,7 @@ A minimal, self-contained Python Cloud Run service using `uv` for dependency man
 ### 1. Install dependencies locally (optional)
 
 ```bash
-cd gmail-agent
+cd gmail-responder-agent
 uv sync
 ```
 
@@ -37,7 +37,35 @@ export GMAIL_CLIENT_ID=your-client-id
 export GMAIL_CLIENT_SECRET=your-client-secret
 export GMAIL_REFRESH_TOKEN_hello_kagence_ai=your-refresh-token
 
-uv run uvicorn src.main:app --reload --port 8080
+uv run python -m uvicorn  src.main:app --reload --port 8080
+
+# stop 
+Ctrl + C
+
+pkill -f "uvicorn src.main:app"
+
+
+export GMAIL_RESPONSER_AGENT_PATH=http://127.0.0.1:8080
+curl -vvv $GMAIL_RESPONSER_AGENT_PATH/health
+curl -vvv $GMAIL_RESPONSER_AGENT_PATH/
+
+curl -X POST "$GMAIL_RESPONSER_AGENT_PATH/echo" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "hello"}'
+
+
+curl -X POST "$GMAIL_RESPONSER_AGENT_PATH/agent/process-unread" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "hello@kagence.ai",
+    "max_emails": 1,
+    "label_ids": ["UNREAD", "INBOX"],
+    "skip_existing_drafts": true
+  }'
+
+
+
+
 ```
 
 Visit http://localhost:8080 to see the API.

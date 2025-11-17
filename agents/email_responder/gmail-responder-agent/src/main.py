@@ -43,6 +43,9 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
 ]
 
+# Label for tracking processed messages
+AI_PROCESSED_LABEL = "AI_PROCESSED"
+
 
 class HealthResponse(BaseModel):
     status: str
@@ -458,6 +461,89 @@ def check_existing_draft(
     return False
 
 
+def _ensure_ai_processed_label_exists(creds: Credentials, email: str) -> str:
+    """
+    Ensure the AI_PROCESSED label exists in Gmail, creating it if necessary.
+    Returns the label ID.
+    """
+    gmail = build("gmail", "v1", credentials=creds)
+    try:
+        # List all labels to check if AI_PROCESSED exists
+        labels = gmail.users().labels().list(userId=email).execute()
+        for label in labels.get("labels", []):
+            if label.get("name") == AI_PROCESSED_LABEL:
+                return label.get("id")
+        
+        # Label doesn't exist, create it
+        label_body = {
+            "name": AI_PROCESSED_LABEL,
+            "labelListVisibility": "labelShow",
+            "messageListVisibility": "show",
+        }
+        created = gmail.users().labels().create(userId=email, body=label_body).execute()
+        print(f"_ensure_ai_processed_label_exists: created label '{AI_PROCESSED_LABEL}' with id={created.get('id')}", flush=True)
+        return created.get("id")
+    except Exception as e:
+        print(f"_ensure_ai_processed_label_exists: error ensuring label exists: {type(e).__name__}: {str(e)}", flush=True)
+        # If we can't create it, try to find it again or return None
+        # The modify operation will fail gracefully if label doesn't exist
+        return None
+
+
+def has_ai_processed_label(
+    creds: Credentials,
+    email: str,
+    message: Dict[str, Any],
+) -> bool:
+    """
+    Check if a message has the AI_PROCESSED label.
+    Fetches the label ID if needed and checks against message labelIds.
+    """
+    label_ids = message.get("labelIds", []) or []
+    if not label_ids:
+        return False
+    
+    # Get the AI_PROCESSED label ID
+    label_id = _ensure_ai_processed_label_exists(creds, email)
+    if not label_id:
+        return False
+    
+    return label_id in label_ids
+
+
+def mark_message_as_processed(
+    creds: Credentials,
+    email: str,
+    message_id: str,
+) -> None:
+    """
+    Mark a message as AI_PROCESSED and remove UNREAD label.
+    This ensures the message won't be processed again.
+    """
+    gmail = build("gmail", "v1", credentials=creds)
+    try:
+        # Ensure the label exists and get its ID
+        label_id = _ensure_ai_processed_label_exists(creds, email)
+        if not label_id:
+            print(f"mark_message_as_processed: could not get/create AI_PROCESSED label for message {message_id}", flush=True)
+            return
+        
+        # Modify the message: add AI_PROCESSED, remove UNREAD
+        modify_body = {
+            "addLabelIds": [label_id],
+            "removeLabelIds": ["UNREAD"],
+        }
+        gmail.users().messages().modify(
+            userId=email,
+            id=message_id,
+            body=modify_body,
+        ).execute()
+        print(f"mark_message_as_processed: marked message {message_id} as AI_PROCESSED and removed UNREAD", flush=True)
+    except Exception as e:
+        print(f"mark_message_as_processed: error marking message {message_id}: {type(e).__name__}: {str(e)}", flush=True)
+        # Don't fail the entire operation if labeling fails
+
+
 def draft_email_reply(
     llm: ChatGoogleGenerativeAI,
     original_email: Dict[str, Any],
@@ -763,18 +849,43 @@ async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] =
                 llm = get_llm()
                 for msg in unread_messages:
                     try:
-                        # Skip drafts/sent/self-authored
+                        # Apply filters: INBOX, UNREAD, NOT SENT, NOT DRAFT, NOT AI_PROCESSED
                         labels = msg.get("labelIds", []) or []
-                        hdrs = extract_headers(msg)
-                        from_addr2 = hdrs.get("from", "") or ""
-                        if "DRAFT" in labels or "SENT" in labels or email_address.lower() in from_addr2.lower():
+                        
+                        # Check INBOX
+                        if "INBOX" not in labels:
                             results["skipped"] += 1
                             continue
+                        
+                        # Check UNREAD
+                        if "UNREAD" not in labels:
+                            results["skipped"] += 1
+                            continue
+                        
+                        # Skip drafts/sent
+                        if "DRAFT" in labels or "SENT" in labels:
+                            results["skipped"] += 1
+                            continue
+                        
+                        # Check if already processed by AI
+                        if has_ai_processed_label(creds, email_address, msg):
+                            results["skipped"] += 1
+                            continue
+                        
+                        hdrs = extract_headers(msg)
+                        from_addr2 = hdrs.get("from", "") or ""
+                        
+                        # Skip self-authored
+                        if email_address.lower() in from_addr2.lower():
+                            results["skipped"] += 1
+                            continue
+                        
                         # Idempotency: skip if draft already exists for thread
                         t_id = msg.get("threadId")
                         if t_id and check_existing_draft(creds, email_address, t_id):
                             results["skipped"] += 1
                             continue
+                        
                         subject2 = hdrs.get("subject", "No Subject")
                         body2 = extract_email_body(msg)
                         # Optional RAG
@@ -796,6 +907,12 @@ async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] =
                             reply_to_address=reply_to2,
                             original_message_id=orig_msg_id2,
                         )
+                        
+                        # Mark message as processed (add AI_PROCESSED label, remove UNREAD)
+                        msg_id = msg.get("id")
+                        if msg_id:
+                            mark_message_as_processed(creds, email_address, msg_id)
+                        
                         results["processed"] += 1
                         results["succeeded"] += 1
                     except Exception as inner_e:
@@ -821,14 +938,32 @@ async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] =
         body_text = extract_email_body(message)
         print(f"/pubsub/push: extracted headers subject='{subject}' from='{from_addr}' body_len={len(body_text)}", flush=True)
 
-        # Skip drafts/sent to avoid loops (Pub/Sub can notify on our own draft creation)
+        # Apply filters: INBOX, UNREAD, NOT SENT, NOT DRAFT, NOT AI_PROCESSED
         label_ids = message.get("labelIds", []) or []
+        
+        # Check INBOX
+        if "INBOX" not in label_ids:
+            print(f"/pubsub/push: skipping because message is not in INBOX (id={message.get('id')})", flush=True)
+            return {"status": "ok", "skipped": "not_in_inbox", "messageId": message.get("id")}
+        
+        # Check UNREAD
+        if "UNREAD" not in label_ids:
+            print(f"/pubsub/push: skipping because message is not UNREAD (id={message.get('id')})", flush=True)
+            return {"status": "ok", "skipped": "not_unread", "messageId": message.get("id")}
+        
+        # Skip drafts/sent to avoid loops (Pub/Sub can notify on our own draft creation)
         if "DRAFT" in label_ids:
             print(f"/pubsub/push: skipping because message has DRAFT label (id={message.get('id')})", flush=True)
             return {"status": "ok", "skipped": "is_draft", "messageId": message.get("id")}
         if "SENT" in label_ids:
             print(f"/pubsub/push: skipping because message has SENT label (id={message.get('id')})", flush=True)
             return {"status": "ok", "skipped": "is_sent", "messageId": message.get("id")}
+        
+        # Check if already processed by AI
+        if has_ai_processed_label(creds, email_address, message):
+            print(f"/pubsub/push: skipping because message already has AI_PROCESSED label (id={message.get('id')})", flush=True)
+            return {"status": "ok", "skipped": "ai_processed", "messageId": message.get("id")}
+        
         # Also skip if the message appears authored by the watched address
         if email_address.lower() in (from_addr or "").lower():
             print(f"/pubsub/push: skipping because from_addr matches watched email ({email_address})", flush=True)
@@ -866,6 +1001,11 @@ async def handle_pubsub_push(body: PubSubMessage, authorization: Optional[str] =
             reply_to_address=reply_to,
             original_message_id=original_message_id,
         )
+
+        # Mark message as processed (add AI_PROCESSED label, remove UNREAD)
+        msg_id = message.get("id")
+        if msg_id:
+            mark_message_as_processed(creds, email_address, msg_id)
 
         print(f"Created draft {draft_id} for email {email_address} (messageId={message_id}, historyId={history_id})", flush=True)
         return {"status": "ok", "draft_id": draft_id}
@@ -914,6 +1054,79 @@ async def process_unread_emails(request: ProcessUnreadRequest) -> ProcessUnreadR
             headers = extract_headers(msg)
             subject = headers.get("subject", "No Subject")
             from_addr = headers.get("from", "Unknown")
+            
+            # Apply filters: INBOX, UNREAD, NOT SENT, NOT DRAFT, NOT AI_PROCESSED
+            label_ids = msg.get("labelIds", []) or []
+            
+            # Check INBOX
+            if "INBOX" not in label_ids:
+                print(f"Skipping {message_id} - not in INBOX", flush=True)
+                results.append(
+                    EmailProcessingResult(
+                        message_id=message_id,
+                        subject=subject,
+                        from_address=from_addr,
+                        success=False,
+                        error="Not in INBOX",
+                    )
+                )
+                continue
+            
+            # Check UNREAD
+            if "UNREAD" not in label_ids:
+                print(f"Skipping {message_id} - not UNREAD", flush=True)
+                results.append(
+                    EmailProcessingResult(
+                        message_id=message_id,
+                        subject=subject,
+                        from_address=from_addr,
+                        success=False,
+                        error="Not UNREAD",
+                    )
+                )
+                continue
+            
+            # Skip drafts/sent
+            if "DRAFT" in label_ids or "SENT" in label_ids:
+                print(f"Skipping {message_id} - has DRAFT or SENT label", flush=True)
+                results.append(
+                    EmailProcessingResult(
+                        message_id=message_id,
+                        subject=subject,
+                        from_address=from_addr,
+                        success=False,
+                        error="Has DRAFT or SENT label",
+                    )
+                )
+                continue
+            
+            # Check if already processed by AI
+            if has_ai_processed_label(creds, request.email, msg):
+                print(f"Skipping {message_id} - already has AI_PROCESSED label", flush=True)
+                results.append(
+                    EmailProcessingResult(
+                        message_id=message_id,
+                        subject=subject,
+                        from_address=from_addr,
+                        success=False,
+                        error="Already processed by AI",
+                    )
+                )
+                continue
+            
+            # Skip self-authored
+            if request.email.lower() in (from_addr or "").lower():
+                print(f"Skipping {message_id} - self-authored", flush=True)
+                results.append(
+                    EmailProcessingResult(
+                        message_id=message_id,
+                        subject=subject,
+                        from_address=from_addr,
+                        success=False,
+                        error="Self-authored",
+                    )
+                )
+                continue
 
             # Skip if draft already exists
             if request.skip_existing_drafts and check_existing_draft(creds, request.email, thread_id):
@@ -963,6 +1176,9 @@ async def process_unread_emails(request: ProcessUnreadRequest) -> ProcessUnreadR
                     reply_to_address=reply_to,
                     original_message_id=original_message_id,
                 )
+
+                # Mark message as processed (add AI_PROCESSED label, remove UNREAD)
+                mark_message_as_processed(creds, request.email, message_id)
 
                 print(f"Created draft {draft_id} for message {message_id}", flush=True)
 
