@@ -70,7 +70,7 @@ curl -X POST "$GMAIL_RESPONSER_AGENT_PATH/echo" \
 curl -X POST "$GMAIL_RESPONSER_AGENT_PATH/agent/process-unread" \
   -H "Content-Type: application/json" \
   -d '{
-    "email": "hello@kagence.ai",
+    "email": "noah.bobypt@gmail.com",
     "max_emails": 1,
     "label_ids": ["UNREAD", "INBOX"],
     "skip_existing_drafts": true
