@@ -1,0 +1,15 @@
+[project]
+name = "rag-local"
+version = "0.1.0"
+description = "Local RAG server with FAISS vector search"
+requires-python = ">=3.11"
+dependencies = [
+    "faiss-cpu",
+    "numpy",
+    "sentence-transformers",
+    "fastapi",
+    "uvicorn",
+    "python-multipart",
+    "google-generativeai",
+]
+

@@ -234,3 +234,6 @@ buildNumber.properties
 
 # Project-specific
 *.egg-info/
+
+*.faiss
+

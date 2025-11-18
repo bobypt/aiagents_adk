@@ -1,0 +1,6 @@
+{
+  "model_type": "gemini",
+  "model_name": "gemini/gemini-embedding-001",
+  "dimension": 768,
+  "num_chunks": 175
+}
