@@ -30,7 +30,7 @@ RUN mkdir -p /app/output
 # If output exists locally, it will be copied here. 
 # If output doesn't exist, build-docker.sh adds it to .dockerignore, so COPY will be skipped.
 # Then we'll build vectors in the RUN command below.
-COPY rag_output ./output
+COPY output ./output
 
 # Check if output folder has all required files, if not build vectors
 RUN if [ -f /app/output/index.faiss ] && [ -f /app/output/metadata.json ] && [ -f /app/output/model_info.json ]; then \

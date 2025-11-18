@@ -5,3 +5,5 @@ fastapi
 uvicorn
 python-multipart
 google-generativeai
+firebase-admin
+pydantic
