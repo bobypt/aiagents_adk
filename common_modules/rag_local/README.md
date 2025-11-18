@@ -90,10 +90,7 @@ curl -X POST "http://localhost:8080/rag" \
 ```json
 {
   "query": "What are organic apples?",
-  "contexts": [...],
-  "answer": "Based on the documents:\n\n...",
-  "user_id": "firebase-user-id",
-  "user_email": "user@example.com"
+  "answer": "Based on the documents:\n\n..."
 }
 ```
 

@@ -19,23 +19,35 @@ app = FastAPI()
 security = HTTPBearer()
 
 # Initialize Firebase Admin SDK for token validation
-# Only needs project ID - no service account required
+# Tries Application Default Credentials first, then falls back to project ID only
 firebase_initialized = False
+project_id = os.getenv("FIREBASE_PROJECT_ID")
+
 try:
-    project_id = os.getenv("FIREBASE_PROJECT_ID")
-    if project_id:
-        # Initialize with just project ID - SDK will fetch public keys automatically
-        firebase_admin.initialize_app(options={"projectId": project_id})
-        firebase_initialized = True
-        print(f"Firebase Admin initialized with project ID: {project_id}", flush=True)
-    else:
-        # Try to initialize without explicit project ID (may work in some environments)
-        try:
+    # Try to initialize with Application Default Credentials first (works with gcloud auth)
+    try:
+        if project_id:
+            firebase_admin.initialize_app(options={"projectId": project_id})
+        else:
             firebase_admin.initialize_app()
-            firebase_initialized = True
-            print("Firebase Admin initialized (project ID auto-detected)", flush=True)
-        except Exception as e:
-            print(f"Warning: Firebase Admin initialization failed. Set FIREBASE_PROJECT_ID env var. Error: {e}", flush=True)
+        firebase_initialized = True
+        print(f"Firebase Admin initialized with Application Default Credentials (project: {project_id or 'auto-detected'})", flush=True)
+    except Exception as adc_error:
+        # If ADC fails, try with just project ID (might work for token verification)
+        if project_id:
+            try:
+                # Try initializing with a minimal credential (for token verification only)
+                # Firebase Admin SDK can verify tokens using public keys even without full credentials
+                firebase_admin.initialize_app(
+                    credential=None,  # Use None to skip credential requirement
+                    options={"projectId": project_id}
+                )
+                firebase_initialized = True
+                print(f"Firebase Admin initialized with project ID only: {project_id}", flush=True)
+            except Exception as e2:
+                print(f"Warning: Firebase Admin initialization failed. ADC error: {adc_error}, Project ID only error: {e2}", flush=True)
+        else:
+            print(f"Warning: Firebase Admin initialization failed. Set FIREBASE_PROJECT_ID env var. Error: {adc_error}", flush=True)
 except Exception as e:
     print(f"Warning: Firebase Admin initialization failed: {e}. Auth validation will be disabled.", flush=True)
 
@@ -90,22 +102,36 @@ async def verify_firebase_token(credentials: HTTPAuthorizationCredentials = Depe
     token = credentials.credentials
     try:
         # Verify the ID token
-        decoded_token = auth.verify_id_token(token)
+        decoded_token = auth.verify_id_token(token, check_revoked=False)
+        print(f"Token verified successfully for user: {decoded_token.get('email', decoded_token.get('uid', 'unknown'))}", flush=True)
         return decoded_token
-    except auth.InvalidIdTokenError:
+    except auth.InvalidIdTokenError as e:
+        print(f"InvalidIdTokenError: {str(e)}", flush=True)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication token"
+            detail=f"Invalid authentication token: {str(e)}"
         )
-    except auth.ExpiredIdTokenError:
+    except auth.ExpiredIdTokenError as e:
+        print(f"ExpiredIdTokenError: {str(e)}", flush=True)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication token has expired"
+            detail=f"Authentication token has expired: {str(e)}"
+        )
+    except ValueError as e:
+        print(f"ValueError during token verification: {str(e)}", flush=True)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Token validation error: {str(e)}"
         )
     except Exception as e:
+        error_type = type(e).__name__
+        error_msg = str(e)
+        print(f"Unexpected error during token verification: {error_type}: {error_msg}", flush=True)
+        import traceback
+        print(traceback.format_exc(), flush=True)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Authentication failed: {str(e)}"
+            detail=f"Authentication failed: {error_type}: {error_msg}"
         )
 
 
@@ -126,10 +152,7 @@ async def rag(request: RAGRequest, user: dict = Depends(verify_firebase_token)):
 
     return {
         "query": query,
-        "contexts": contexts,
-        "answer": answer,
-        "user_id": user.get("uid"),
-        "user_email": user.get("email")
+        "answer": answer
     }
 
 if __name__ == "__main__":
