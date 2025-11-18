@@ -72,7 +72,22 @@ curl "http://localhost:8080/rag?query=What%20are%20organic%20apples?"
 
 ## Docker Run
 
+**Run in foreground (Ctrl+C to stop):**
 ```bash
 # Pass the API key as an environment variable
-docker run -p 8080:8080 -e GOOGLE_API_KEY=$GOOGLE_API_KEY rag-server
+docker run --rm --name rag-server -p 8080:8080 -e GOOGLE_API_KEY=$GOOGLE_API_KEY rag-server
 ```
+
+**Run in background (detached mode):**
+```bash
+# Start in background
+docker run -d --name rag-server -p 8080:8080 -e GOOGLE_API_KEY=$GOOGLE_API_KEY rag-server
+
+# Stop the container
+docker stop rag-server
+
+# Remove the container (if not using --rm)
+docker rm rag-server
+```
+
+**Note:** The `--rm` flag automatically removes the container when it stops, so you don't need to manually clean it up.
